@@ -137,6 +137,7 @@ class DecisionSnapshot(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     decision_id: str
+    symbol: str = "XAUUSDT"
     timestamp: int
     decision_state: DecisionState
     regime: MarketRegime

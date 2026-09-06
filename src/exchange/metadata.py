@@ -73,8 +73,11 @@ class ExchangeMetadata(BaseModel):
         """Build metadata container from raw exchangeInfo payload."""
         symbols_map: dict[str, SymbolFilters] = {}
         for s in raw.get("symbols", []):
-            filters = SymbolFilters.from_raw(s)
-            symbols_map[filters.symbol] = filters
+            try:
+                filters = SymbolFilters.from_raw(s)
+                symbols_map[filters.symbol] = filters
+            except Exception:
+                continue
 
         return cls(
             timezone=str(raw.get("timezone", "UTC")),

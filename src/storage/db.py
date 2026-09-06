@@ -176,6 +176,36 @@ class DatabaseManager:
                 source=row[8],
             )
 
+    async def get_recent_decisions(self, limit: int = 50) -> list[DecisionSnapshot]:
+        """Retrieve latest decision snapshots ordered by timestamp descending."""
+        async with self.connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT decision_id, timestamp, decision_state, regime,
+                       indicators_json, risk_state_json, event_state_json,
+                       reason, source
+                FROM decision_snapshots
+                ORDER BY timestamp DESC
+                LIMIT ?;
+                """,
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+            return [
+                DecisionSnapshot(
+                    decision_id=row[0],
+                    timestamp=row[1],
+                    decision_state=DecisionState(row[2]),
+                    regime=MarketRegime(row[3]),
+                    indicators=json.loads(row[4]),
+                    risk_state=json.loads(row[5]),
+                    event_state=json.loads(row[6]),
+                    reason=row[7],
+                    source=row[8],
+                )
+                for row in rows
+            ]
+
     async def save_candle(self, candle: Candle) -> None:
         """Persist a completed canonical candle to SQLite."""
         async with self.connection() as conn:
