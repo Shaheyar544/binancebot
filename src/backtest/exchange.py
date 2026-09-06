@@ -3,17 +3,28 @@
 import uuid
 from decimal import Decimal
 
-from src.backtest.models import BacktestConfig, LimitFillModel, SimulatedTrade
+from src.backtest.models import (
+    BacktestConfig,
+    LimitFillModel,
+    LiquidationModelPolicy,
+    SimulatedTrade,
+)
 from src.domain.enums import OrderSide, PositionSide
 from src.domain.models import Candle, OrderIntent, PositionSnapshot
+from src.risk.liquidation import ExchangeLiquidationEstimator
 
 
 class SimulatedExchange:
     """Simulates realistic Binance Futures execution without network calls."""
 
-    def __init__(self, config: BacktestConfig) -> None:
+    def __init__(
+        self,
+        config: BacktestConfig,
+        estimator: ExchangeLiquidationEstimator | None = None,
+    ) -> None:
         self.config = config
         self.policy = config.execution_policy
+        self.estimator = estimator
         self.wallet_balance = config.initial_balance
         self.position: PositionSnapshot | None = None
         self.closed_trades: list[SimulatedTrade] = []
@@ -71,9 +82,16 @@ class SimulatedExchange:
                 # Initial position entry
                 self.dca_fills_count = 0
                 margin = actual_notional / self.config.user_risk_config.leverage
-                liq_price = fill_price * (
-                    Decimal("1.0") - (Decimal("1.0") / self.config.user_risk_config.leverage)
-                )
+                liq_price = None
+                if (
+                    self.policy.liquidation_policy == LiquidationModelPolicy.EXPLICIT_MODEL
+                    and self.estimator is not None
+                ):
+                    liq_price = self.estimator.estimate_liquidation_price(
+                        entry_price=fill_price,
+                        leverage=self.config.user_risk_config.leverage,
+                        allocated_funds=self.config.user_risk_config.allocated_funds,
+                    )
                 self.position = PositionSnapshot(
                     symbol=intent.symbol,
                     side=PositionSide.LONG,
@@ -103,9 +121,16 @@ class SimulatedExchange:
                 new_notional = (self.position.size * self.position.entry_price) + actual_notional
                 avg_entry = new_notional / new_size
                 new_margin = new_notional / self.config.user_risk_config.leverage
-                liq_price = avg_entry * (
-                    Decimal("1.0") - (Decimal("1.0") / self.config.user_risk_config.leverage)
-                )
+                liq_price = None
+                if (
+                    self.policy.liquidation_policy == LiquidationModelPolicy.EXPLICIT_MODEL
+                    and self.estimator is not None
+                ):
+                    liq_price = self.estimator.estimate_liquidation_price(
+                        entry_price=avg_entry,
+                        leverage=self.config.user_risk_config.leverage,
+                        allocated_funds=self.config.user_risk_config.allocated_funds,
+                    )
                 self.position = PositionSnapshot(
                     symbol=intent.symbol,
                     side=PositionSide.LONG,
@@ -219,7 +244,7 @@ class SimulatedExchange:
 
     def check_liquidation(self, candle: Candle) -> bool:
         """Check if candle low breaches liquidation threshold."""
-        if self.position is None:
+        if self.position is None or self.position.liquidation_price is None:
             return False
 
         if candle.low <= self.position.liquidation_price:

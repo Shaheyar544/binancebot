@@ -76,8 +76,11 @@ def test_simulated_exchange_fill_and_fee(backtest_config: BacktestConfig) -> Non
 
 
 def test_simulated_exchange_liquidation(backtest_config: BacktestConfig) -> None:
-    """If candle low touches liquidation price, position is liquidated."""
-    exchange = SimulatedExchange(config=backtest_config)
+    """If candle touches liquidation price, position is liquidated with explicit model."""
+    from src.risk.liquidation import ConfigurableLiquidationEstimator
+
+    estimator = ConfigurableLiquidationEstimator(fixed_price=Decimal("2160.00"))
+    exchange = SimulatedExchange(config=backtest_config, estimator=estimator)
     candle_entry = make_candle("2700.00", "2710.00", "2695.00", "2700.00", t=1700000000000)
 
     intent = OrderIntent(
@@ -93,6 +96,8 @@ def test_simulated_exchange_liquidation(backtest_config: BacktestConfig) -> None
         reason="Entry test",
     )
     exchange.process_order(intent, candle_entry)
+    assert exchange.position is not None
+    assert exchange.position.liquidation_price == Decimal("2160.00")
 
     # Candle dipping to 2100 (below estimated liquidation at 2160)
     candle_crash = make_candle("2300.00", "2300.00", "2100.00", "2150.00", t=1700000900000)
@@ -101,6 +106,42 @@ def test_simulated_exchange_liquidation(backtest_config: BacktestConfig) -> None
     assert was_liquidated is True
     assert exchange.has_open_position() is False
     assert exchange.liquidations_count == 1
+
+
+def test_simulated_exchange_no_liquidation_when_unavailable(
+    backtest_config: BacktestConfig,
+) -> None:
+    """When liquidation estimator is unavailable, liquidation_price is None and no liquidation."""
+    from src.backtest.models import LiquidationModelPolicy
+
+    policy = backtest_config.execution_policy.model_copy(
+        update={"liquidation_policy": LiquidationModelPolicy.UNAVAILABLE}
+    )
+    cfg = backtest_config.model_copy(update={"execution_policy": policy})
+    exchange = SimulatedExchange(config=cfg, estimator=None)
+    candle_entry = make_candle("2700.00", "2710.00", "2695.00", "2700.00", t=1700000000000)
+
+    intent = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="LIMIT",
+        quantity=Decimal("1.0"),
+        price=Decimal("2700.00"),
+        notional=Decimal("2700.00"),
+        is_dca=False,
+        is_opening=True,
+        client_order_id="TEST_BUY_UNAVAIL",
+        reason="Entry test",
+    )
+    exchange.process_order(intent, candle_entry)
+    assert exchange.position is not None
+    assert exchange.position.liquidation_price is None
+
+    # Even on a massive crash, liquidation cannot trigger from a fabricated price
+    candle_crash = make_candle("2300.00", "2300.00", "1000.00", "1100.00", t=1700000900000)
+    assert exchange.check_liquidation(candle_crash) is False
+    assert exchange.has_open_position() is True
+    assert exchange.liquidations_count == 0
 
 
 def test_simulated_exchange_funding_accrual(backtest_config: BacktestConfig) -> None:

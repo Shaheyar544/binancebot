@@ -10,6 +10,8 @@ from src.backtest.models import (
     BacktestConfig,
     BacktestExecutionPolicy,
     IntrabarAmbiguityPolicy,
+    LiquidationModelPolicy,
+    SimulatedTrade,
 )
 from src.config.settings import UserRiskConfig
 from src.domain.enums import OrderSide, Timeframe
@@ -17,6 +19,7 @@ from src.domain.models import Candle, OrderIntent
 from src.exchange.metadata import SymbolFilters
 from src.risk.engine import RiskEngine
 from src.risk.liquidation import (
+    ConfigurableLiquidationEstimator,
     UnavailableLiquidationEstimator,
 )
 from src.risk.models import AccountRiskState, RiskRejectionReason
@@ -536,3 +539,326 @@ def test_insufficient_bars_handles_atr_unavailability(base_risk_config: UserRisk
     )
     assert exit_intent is None
     assert is_ambiguous is False
+
+
+def test_simulated_exchange_refuses_to_fabricate_liquidation_price(
+    base_risk_config: UserRiskConfig,
+) -> None:
+    """SimulatedExchange strictly never fabricates liquidation prices without explicit estimator."""
+    # When estimator is not provided or policy is UNAVAILABLE, liquidation_price is None
+    cfg = BacktestConfig(
+        user_risk_config=base_risk_config,
+        execution_policy=BacktestExecutionPolicy(
+            liquidation_policy=LiquidationModelPolicy.UNAVAILABLE
+        ),
+    )
+    exchange = SimulatedExchange(config=cfg, estimator=None)
+    candle = Candle(
+        symbol="XAUUSDT",
+        timeframe=Timeframe.M15,
+        open_time=1000,
+        open=Decimal("2700.00"),
+        high=Decimal("2710.00"),
+        low=Decimal("2690.00"),
+        close=Decimal("2700.00"),
+        volume=Decimal("10.0"),
+        close_time=1999,
+        is_closed=True,
+    )
+    intent = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="LIMIT",
+        price=Decimal("2700.00"),
+        quantity=Decimal("1.000"),
+        notional=Decimal("2700.00"),
+        is_opening=True,
+        client_order_id="BUY_1",
+        reason="Entry",
+    )
+    exchange.process_order(intent, candle)
+    assert exchange.position is not None
+    # Invariant: No generic formula (such as 2700 * (1 - 1/2) = 1350) fabricated!
+    assert exchange.position.liquidation_price is None
+
+
+def test_simulated_exchange_uses_explicit_estimator_when_injected(
+    base_risk_config: UserRiskConfig,
+) -> None:
+    """When EXPLICIT_MODEL policy and estimator are provided, SimulatedExchange uses estimator."""
+    estimator = ConfigurableLiquidationEstimator(fixed_price=Decimal("2450.00"))
+    cfg = BacktestConfig(
+        user_risk_config=base_risk_config,
+        execution_policy=BacktestExecutionPolicy(
+            liquidation_policy=LiquidationModelPolicy.EXPLICIT_MODEL
+        ),
+    )
+    exchange = SimulatedExchange(config=cfg, estimator=estimator)
+    candle = Candle(
+        symbol="XAUUSDT",
+        timeframe=Timeframe.M15,
+        open_time=1000,
+        open=Decimal("2700.00"),
+        high=Decimal("2710.00"),
+        low=Decimal("2690.00"),
+        close=Decimal("2700.00"),
+        volume=Decimal("10.0"),
+        close_time=1999,
+        is_closed=True,
+    )
+    intent = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="LIMIT",
+        price=Decimal("2700.00"),
+        quantity=Decimal("1.000"),
+        notional=Decimal("2700.00"),
+        is_opening=True,
+        client_order_id="BUY_EXPLICIT",
+        reason="Entry",
+    )
+    exchange.process_order(intent, candle)
+    assert exchange.position is not None
+    assert exchange.position.liquidation_price == Decimal("2450.00")
+
+
+def test_backtest_missing_initial_stop_metadata_fails_closed(
+    base_risk_config: UserRiskConfig,
+) -> None:
+    """If trade metadata lacks authoritative initial_stop/initial_r, engine raises ValueError."""
+    cfg = BacktestConfig(user_risk_config=base_risk_config)
+    engine = BacktestEngine(config=cfg)
+
+    # Manually append a simulated trade without recording active_trade_meta
+    trade = SimulatedTrade(
+        trade_id="missing_meta_1",
+        entry_time=1000,
+        exit_time=2000,
+        entry_price=Decimal("2700.00"),
+        exit_price=Decimal("2710.00"),
+        size=Decimal("1.000"),
+        notional=Decimal("2700.00"),
+        realized_pnl=Decimal("10.00"),
+        exit_reason="TP",
+    )
+    engine.exchange.closed_trades.append(trade)
+
+    candle = Candle(
+        symbol="XAUUSDT",
+        timeframe=Timeframe.M15,
+        open_time=5000,
+        open=Decimal("2700.00"),
+        high=Decimal("2705.00"),
+        low=Decimal("2695.00"),
+        close=Decimal("2700.00"),
+        volume=Decimal("10.0"),
+        close_time=5999,
+        is_closed=True,
+    )
+    with pytest.raises(ValueError, match="missing authoritative initial_stop"):
+        engine.run([candle])
+
+
+def test_causal_mfe_and_r_analytics_math(base_risk_config: UserRiskConfig) -> None:
+    """Verify mathematical correctness of MFE, MAE, R multiples, hit rates, and surrendered R."""
+    cfg = BacktestConfig(user_risk_config=base_risk_config)
+    engine = BacktestEngine(config=cfg)
+
+    # Setup 2 closed trades with known MFE, MAE, and PnL
+    # Trade 1: Entry 2700, Stop 2680 (Risk 20), Size 1.0. MFE $40 (2.0R), Exit 2730 (+30, 1.5R).
+    t1 = SimulatedTrade(
+        trade_id="t1",
+        entry_time=1000,
+        exit_time=2000,
+        entry_price=Decimal("2700.00"),
+        exit_price=Decimal("2730.00"),
+        size=Decimal("1.000"),
+        notional=Decimal("2700.00"),
+        realized_pnl=Decimal("30.00"),
+        max_favorable_excursion=Decimal("40.00"),
+        max_adverse_excursion=Decimal("5.00"),
+        exit_reason="TP",
+    )
+    # Trade 2: Entry 2700, Stop 2680 (Risk 20), Size 1.0. MFE $10 (0.5R), Exit 2680 (-20, -1.0R).
+    t2 = SimulatedTrade(
+        trade_id="t2",
+        entry_time=3000,
+        exit_time=4000,
+        entry_price=Decimal("2700.00"),
+        exit_price=Decimal("2680.00"),
+        size=Decimal("1.000"),
+        notional=Decimal("2700.00"),
+        realized_pnl=Decimal("-20.00"),
+        max_favorable_excursion=Decimal("10.00"),
+        max_adverse_excursion=Decimal("20.00"),
+        exit_reason="STOP",
+    )
+    engine.exchange.closed_trades.extend([t1, t2])
+    engine.active_trade_meta["t1"] = {
+        "entry_score": Decimal("85.0"),
+        "regime": "BULL",
+        "entry_family": "TREND_PULLBACK",
+        "initial_stop": Decimal("2680.00"),
+        "initial_r": Decimal("20.00"),
+    }
+    engine.active_trade_meta["t2"] = {
+        "entry_score": Decimal("82.0"),
+        "regime": "BULL",
+        "entry_family": "TREND_PULLBACK",
+        "initial_stop": Decimal("2680.00"),
+        "initial_r": Decimal("20.00"),
+    }
+
+    candle = Candle(
+        symbol="XAUUSDT",
+        timeframe=Timeframe.M15,
+        open_time=5000,
+        open=Decimal("2700.00"),
+        high=Decimal("2705.00"),
+        low=Decimal("2695.00"),
+        close=Decimal("2700.00"),
+        volume=Decimal("10.0"),
+        close_time=5999,
+        is_closed=True,
+    )
+    res = engine.run([candle])
+    assert res.total_trades == 2
+    assert res.winning_trades == 1
+    assert res.losing_trades == 1
+
+    # Diagnostics inspection
+    assert len(res.diagnostics) == 2
+    d1 = res.diagnostics[0]
+    assert d1.mfe == Decimal("40.00")
+    assert d1.mfe_r == Decimal("2.00")
+    assert d1.realized_r == Decimal("1.50")
+
+    d2 = res.diagnostics[1]
+    assert d2.mfe == Decimal("10.00")
+    assert d2.mfe_r == Decimal("0.50")
+    assert d2.realized_r == Decimal("-1.00")
+
+    # MFE / R summary metrics
+    # mfe_avg: (40 + 10) / 2 = 25.00
+    assert res.mfe_avg == Decimal("25.00")
+    # mfe_median: median([40, 10]) = 25.00
+    assert res.mfe_median == Decimal("25.00")
+    # mfe_r_avg: (2.0 + 0.5) / 2 = 1.25
+    assert res.mfe_r_avg == Decimal("1.25")
+    # max_r_reached: 2.00
+    assert res.max_r_reached == Decimal("2.00")
+    # r_realized_avg: (1.50 - 1.00) / 2 = 0.25
+    assert res.r_realized_avg == Decimal("0.25")
+    # r_surrendered_avg:
+    # t1 surrendered: 2.0 - 1.5 = 0.5R
+    # t2 surrendered: 0.5 - (-1.0) = 1.5R
+    # avg surrendered: (0.5 + 1.5) / 2 = 1.00R
+    assert res.r_surrendered_avg == Decimal("1.00")
+
+    # mfe_realization_pct_winners: t1 realized 30/40 * 100 = 75.0%
+    assert res.mfe_realization_pct_winners == Decimal("75.00")
+
+    # Target R hit rates
+    assert res.r_target_hit_rates["0.5R"] == Decimal("1.00")  # both reached >= 0.5R
+    assert res.r_target_hit_rates["1.0R"] == Decimal("0.50")  # only t1 reached >= 1.0R
+    assert res.r_target_hit_rates["1.5R"] == Decimal("0.50")
+    assert res.r_target_hit_rates["2.0R"] == Decimal("0.50")
+
+    # Positive MFE closing loser: t2 had MFE 10.00 but lost -> 1 out of 2 = 50.0%
+    assert res.positive_mfe_closing_loser_pct == Decimal("50.00")
+
+    # Liquidation status is explicitly UNAVAILABLE, never false 100% safe claim
+    assert res.liquidation_model_status == "UNAVAILABLE"
+    assert res.liquidations_count == 0
+
+
+def test_partial_exit_preserves_mfe_mae_r_accounting(
+    base_risk_config: UserRiskConfig,
+) -> None:
+    """When partial TP is taken, active trade continues tracking MFE/MAE accurately."""
+    cfg = BacktestConfig(
+        user_risk_config=base_risk_config,
+        execution_policy=BacktestExecutionPolicy(
+            slippage_pct=Decimal("0.0"), taker_fee=Decimal("0.0"), maker_fee=Decimal("0.0")
+        ),
+    )
+    exchange = SimulatedExchange(config=cfg)
+
+    # Initial entry: 1.0 @ 2700
+    c1 = Candle(
+        symbol="XAUUSDT",
+        timeframe=Timeframe.M15,
+        open_time=1000,
+        open=Decimal("2700.00"),
+        high=Decimal("2710.00"),
+        low=Decimal("2695.00"),
+        close=Decimal("2700.00"),
+        volume=Decimal("10.0"),
+        close_time=1999,
+        is_closed=True,
+    )
+    exchange.process_order(
+        OrderIntent(
+            symbol="XAUUSDT",
+            side=OrderSide.BUY,
+            order_type="LIMIT",
+            price=Decimal("2700.00"),
+            quantity=Decimal("1.000"),
+            notional=Decimal("2700.00"),
+            is_opening=True,
+            client_order_id="BUY_INIT",
+            reason="Entry",
+        ),
+        c1,
+    )
+
+    # Price moves up: High 2740 (favorable = (2740 - 2700) * 1.0 = 40.0)
+    c2 = Candle(
+        symbol="XAUUSDT",
+        timeframe=Timeframe.M15,
+        open_time=2000,
+        open=Decimal("2710.00"),
+        high=Decimal("2740.00"),
+        low=Decimal("2705.00"),
+        close=Decimal("2730.00"),
+        volume=Decimal("10.0"),
+        close_time=2999,
+        is_closed=True,
+    )
+    exchange.update_excursions(c2)
+    assert exchange.active_trade is not None
+    assert exchange.active_trade.max_favorable_excursion == Decimal("40.00")
+
+    # Partial TP at 2730 for 0.5 size
+    exchange.process_order(
+        OrderIntent(
+            symbol="XAUUSDT",
+            side=OrderSide.SELL,
+            order_type="LIMIT",
+            price=Decimal("2730.00"),
+            quantity=Decimal("0.500"),
+            notional=Decimal("1365.00"),
+            is_opening=False,
+            client_order_id="PARTIAL_TP",
+            reason="Partial TP",
+        ),
+        c2,
+    )
+    assert exchange.active_trade.max_favorable_excursion == Decimal("40.00")
+    assert exchange.active_trade.realized_pnl == Decimal("15.00")  # (2730 - 2700) * 0.5
+
+    # Candle dips lower: low 2680 (adverse excursion on 0.5 pos: (2700 - 2680) * 0.5 = 10.0)
+    c3 = Candle(
+        symbol="XAUUSDT",
+        timeframe=Timeframe.M15,
+        open_time=3000,
+        open=Decimal("2710.00"),
+        high=Decimal("2715.00"),
+        low=Decimal("2680.00"),
+        close=Decimal("2690.00"),
+        volume=Decimal("10.0"),
+        close_time=3999,
+        is_closed=True,
+    )
+    exchange.update_excursions(c3)
+    assert exchange.active_trade.max_adverse_excursion == Decimal("10.00")

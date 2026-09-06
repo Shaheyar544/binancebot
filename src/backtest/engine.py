@@ -113,13 +113,6 @@ class BacktestEngine:
     ) -> None:
         self.config = config
         self.policy = config.execution_policy
-        self.exchange = SimulatedExchange(config=config)
-        self.strategy_engine = strategy_engine or StrategyEngine(min_entry_score=80)
-        self.exit_manager = exit_manager or ExitManager()
-        self.orchestrator = EntryOrchestrator()
-        self.regime_classifier = RegimeClassifier()
-        self.filters = filters or DEFAULT_XAU_FILTERS
-
         if estimator is not None:
             liq_estimator = estimator
         elif self.policy.liquidation_policy == LiquidationModelPolicy.UNAVAILABLE:
@@ -133,12 +126,21 @@ class BacktestEngine:
                 reason="Authoritative Binance margin model not provided for backtest"
             )
 
+        self.liq_estimator = liq_estimator
+        self.exchange = SimulatedExchange(config=config, estimator=liq_estimator)
+        self.strategy_engine = strategy_engine or StrategyEngine(min_entry_score=80)
+        self.exit_manager = exit_manager or ExitManager()
+        self.orchestrator = EntryOrchestrator()
+        self.regime_classifier = RegimeClassifier()
+        self.filters = filters or DEFAULT_XAU_FILTERS
+
         self.risk_engine = risk_engine or RiskEngine(
             config=config.user_risk_config,
             filters=self.filters,
             estimator=liq_estimator,
         )
         self.risk_sizer = PositionSizer(filters=self.filters)
+        self.active_trade_meta: dict[str, dict[str, object]] = {}
 
     def get_historical_slice(
         self,
@@ -270,7 +272,7 @@ class BacktestEngine:
         max_drawdown_pct = Decimal("0.0")
         max_exposure = Decimal("0.0")
         max_adds = 0
-        active_trade_meta: dict[str, dict[str, object]] = {}
+        active_trade_meta: dict[str, dict[str, object]] = dict(self.active_trade_meta)
         trade_diagnostics: list[PerTradeDiagnostic] = []
 
         for idx, candle in enumerate(candles):
@@ -697,26 +699,31 @@ class BacktestEngine:
             else Decimal("0.0")
         )
 
-        # Build PerTradeDiagnostic records
+        # Build PerTradeDiagnostic records (AGENTS.md Sec 14: No fabricated stops/risk)
         for t in trades:
-            meta = active_trade_meta.get(t.trade_id, {})
-            # Safely extract initial stop and initial R without hardcoding 15.0
-            fallback_stop = (
-                t.entry_price - Decimal("10.0")
-                if t.entry_price > Decimal("10.0")
-                else Decimal("0.0")
-            )
-            init_stop = (
-                Decimal(str(meta["initial_stop"])) if "initial_stop" in meta else fallback_stop
-            )
-            init_r = (
-                Decimal(str(meta["initial_r"]))
-                if "initial_r" in meta
-                else max(Decimal("1.0"), t.entry_price - init_stop)
-            )
+            meta = active_trade_meta.get(t.trade_id)
+            if not meta or "initial_stop" not in meta or "initial_r" not in meta:
+                raise ValueError(
+                    f"Trade {t.trade_id} missing authoritative initial_stop/initial_r metadata. "
+                    "Fallback stops and fabricated risk distances are strictly forbidden."
+                )
+
+            init_stop = Decimal(str(meta["initial_stop"]))
+            init_r = Decimal(str(meta["initial_r"]))
+            if init_r <= Decimal("0.0"):
+                raise ValueError(
+                    f"Trade {t.trade_id} has non-positive initial_r ({init_r}). "
+                    "Risk distance must be strictly positive."
+                )
+
             r_realized = (
                 round((t.realized_pnl / (t.size * init_r)), 2)
-                if (t.size > Decimal("0") and init_r > Decimal("0"))
+                if t.size > Decimal("0")
+                else Decimal("0.0")
+            )
+            trade_mfe_r = (
+                round((t.max_favorable_excursion / (t.size * init_r)), 2)
+                if t.size > Decimal("0")
                 else Decimal("0.0")
             )
             mfe_capture = (
@@ -741,6 +748,8 @@ class BacktestEngine:
                     realized_r=r_realized,
                     mfe=t.max_favorable_excursion,
                     mae=t.max_adverse_excursion,
+                    mfe_r=trade_mfe_r,
+                    max_r_reached=trade_mfe_r,
                     mfe_capture_pct=mfe_capture,
                     gross_pnl=t.realized_pnl + t.fees_paid,
                     net_pnl=t.realized_pnl,
@@ -750,6 +759,112 @@ class BacktestEngine:
                     partial_tp_taken=False,
                 )
             )
+
+        # Compute causal MFE and R analytics across trade diagnostics
+        mfe_vals = [d.mfe for d in trade_diagnostics]
+        mfe_median = (
+            round(Decimal(str(statistics.median(mfe_vals))), 2) if mfe_vals else Decimal("0.0")
+        )
+        mfe_r_avg = (
+            round(
+                sum((d.mfe_r for d in trade_diagnostics), Decimal("0.0"))
+                / Decimal(str(total_trades)),
+                2,
+            )
+            if total_trades > 0
+            else Decimal("0.0")
+        )
+        max_r_reached = (
+            max((d.mfe_r for d in trade_diagnostics), default=Decimal("0.0"))
+            if trade_diagnostics
+            else Decimal("0.0")
+        )
+        r_realized_avg = (
+            round(
+                sum((d.realized_r for d in trade_diagnostics), Decimal("0.0"))
+                / Decimal(str(total_trades)),
+                2,
+            )
+            if total_trades > 0
+            else Decimal("0.0")
+        )
+        r_surrendered_avg = (
+            round(
+                sum(
+                    (max(Decimal("0.0"), d.mfe_r - d.realized_r) for d in trade_diagnostics),
+                    Decimal("0.0"),
+                )
+                / Decimal(str(total_trades)),
+                2,
+            )
+            if total_trades > 0
+            else Decimal("0.0")
+        )
+
+        # MFE realization % for winners: (realized_pnl / mfe) * 100
+        winning_diags = [d for d in trade_diagnostics if d.net_pnl > Decimal("0.0")]
+        mfe_realization_pct_winners = (
+            round(
+                sum(
+                    (
+                        (d.net_pnl / d.mfe) * Decimal("100.0")
+                        for d in winning_diags
+                        if d.mfe > Decimal("0.0")
+                    ),
+                    Decimal("0.0"),
+                )
+                / Decimal(str(len(winning_diags))),
+                2,
+            )
+            if winning_diags
+            else Decimal("0.0")
+        )
+
+        # Giveback %: average (mfe - net_pnl) / mfe across trades with positive MFE
+        pos_mfe_diags = [d for d in trade_diagnostics if d.mfe > Decimal("0.0")]
+        giveback_pct = (
+            round(
+                sum(
+                    (
+                        max(Decimal("0.0"), (d.mfe - d.net_pnl) / d.mfe) * Decimal("100.0")
+                        for d in pos_mfe_diags
+                    ),
+                    Decimal("0.0"),
+                )
+                / Decimal(str(len(pos_mfe_diags))),
+                2,
+            )
+            if pos_mfe_diags
+            else Decimal("0.0")
+        )
+
+        # Target R hit rates: percentage of trades reaching >= 0.5R, 1.0R, 1.5R, 2.0R
+        r_target_hit_rates: dict[str, Decimal] = {}
+        for r_thresh_str, r_thresh_dec in [
+            ("0.5R", Decimal("0.5")),
+            ("1.0R", Decimal("1.0")),
+            ("1.5R", Decimal("1.5")),
+            ("2.0R", Decimal("2.0")),
+        ]:
+            hits = sum(1 for d in trade_diagnostics if d.mfe_r >= r_thresh_dec)
+            r_target_hit_rates[r_thresh_str] = (
+                round(Decimal(str(hits)) / Decimal(str(total_trades)), 2)
+                if total_trades > 0
+                else Decimal("0.0")
+            )
+
+        # Percentage of trades with positive MFE that closed as losers
+        losers_with_pos_mfe = sum(
+            1 for d in trade_diagnostics if d.net_pnl < Decimal("0.0") and d.mfe > Decimal("0.0")
+        )
+        positive_mfe_closing_loser_pct = (
+            round(
+                (Decimal(str(losers_with_pos_mfe)) / Decimal(str(total_trades))) * Decimal("100.0"),
+                2,
+            )
+            if total_trades > 0
+            else Decimal("0.0")
+        )
 
         # Helper to compute breakdown metrics for diagnostic partitions
         def _compute_partition_metrics(
@@ -819,6 +934,14 @@ class BacktestEngine:
             total_fees=self.exchange.total_fees_paid,
             total_funding=self.exchange.total_funding_paid,
             liquidations_count=self.exchange.liquidations_count,
+            liquidation_model_status=(
+                "EXPLICIT_MODEL"
+                if (
+                    self.policy.liquidation_policy == LiquidationModelPolicy.EXPLICIT_MODEL
+                    and not isinstance(self.liq_estimator, UnavailableLiquidationEstimator)
+                )
+                else "UNAVAILABLE"
+            ),
             expectancy=expectancy,
             sharpe_ratio=sharpe,
             sortino_ratio=sortino,
@@ -837,9 +960,18 @@ class BacktestEngine:
             median_loser=med_loser,
             mae_avg=mae_avg,
             mfe_avg=mfe_avg,
+            mfe_median=mfe_median,
+            mfe_r_avg=mfe_r_avg,
+            max_r_reached=max_r_reached,
+            r_realized_avg=r_realized_avg,
+            r_surrendered_avg=r_surrendered_avg,
+            mfe_realization_pct_winners=mfe_realization_pct_winners,
+            giveback_pct=giveback_pct,
+            r_target_hit_rates=r_target_hit_rates,
+            positive_mfe_closing_loser_pct=positive_mfe_closing_loser_pct,
             mfe_capture_pct=mfe_cap_pct,
-            r_multiple_reached_avg=Decimal("0.0"),
-            r_multiple_realized_avg=Decimal("0.0"),
+            r_multiple_reached_avg=mfe_r_avg,
+            r_multiple_realized_avg=r_realized_avg,
             fee_drag_pct=fee_drag_pct,
             funding_drag_pct=funding_drag_pct,
             fees_per_trade=fees_per_trade,

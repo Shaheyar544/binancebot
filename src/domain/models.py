@@ -126,7 +126,7 @@ class PositionSnapshot(BaseModel):
     entry_price: Decimal = Field(gt=Decimal("0"))
     leverage: Decimal = Field(ge=Decimal("1.0"))
     margin: Decimal = Field(gt=Decimal("0"))
-    liquidation_price: Decimal = Field(gt=Decimal("0"))
+    liquidation_price: Decimal | None = None
     unrealized_pnl: Decimal = Decimal("0")
     updated_at: int = 0
 

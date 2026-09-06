@@ -141,12 +141,14 @@ def test_backtest_end_to_end_bull_trend(backtest_config: BacktestConfig) -> None
 
 
 def test_backtest_liquidation_trigger(backtest_config: BacktestConfig) -> None:
-    """Flash crash triggers simulated liquidation check."""
+    """Flash crash triggers simulated liquidation check when explicit estimator is configured."""
     from src.backtest.stress import generate_flash_crash_candles
     from src.domain.enums import OrderSide
     from src.domain.models import OrderIntent
+    from src.risk.liquidation import ConfigurableLiquidationEstimator
 
-    engine = BacktestEngine(config=backtest_config)
+    estimator = ConfigurableLiquidationEstimator(fixed_price=Decimal("2160.00"))
+    engine = BacktestEngine(config=backtest_config, estimator=estimator)
     # Open an initial long position manually
     intent = OrderIntent(
         symbol="XAUUSDT",
@@ -161,10 +163,18 @@ def test_backtest_liquidation_trigger(backtest_config: BacktestConfig) -> None:
         reason="Manual open for liquidation test",
     )
     candle_entry = make_candle(0, "2700.0", "2705.0", "2695.0", "2700.0")
-    engine.exchange.process_order(intent, candle_entry)
+    trade = engine.exchange.process_order(intent, candle_entry)
+    assert trade is not None
     assert engine.exchange.has_open_position()
+    engine.active_trade_meta[trade.trade_id] = {
+        "entry_score": Decimal("85.0"),
+        "regime": "BULL",
+        "entry_family": "TREND_PULLBACK",
+        "initial_stop": Decimal("2680.0"),
+        "initial_r": Decimal("20.0"),
+    }
 
-    # Flash crash 25% down will breach liquidation price
+    # Flash crash 25% down will breach liquidation price (2160)
     crash_candles = generate_flash_crash_candles(
         start_price=Decimal("2700.0"), drop_pct=Decimal("0.25"), num_candles=5
     )
@@ -249,7 +259,15 @@ def test_backtest_funding_application(backtest_config: BacktestConfig) -> None:
     )
     # Candle open_time divisible by 28,800,000 (8h boundary)
     c_open = make_candle(0, "2700.0", "2710.0", "2690.0", "2705.0")
-    engine.exchange.process_order(intent, c_open)
+    trade = engine.exchange.process_order(intent, c_open)
+    assert trade is not None
+    engine.active_trade_meta[trade.trade_id] = {
+        "entry_score": Decimal("85.0"),
+        "regime": "BULL",
+        "entry_family": "TREND_PULLBACK",
+        "initial_stop": Decimal("2680.0"),
+        "initial_r": Decimal("20.0"),
+    }
 
     # Candle crossing boundary at t = 28800000
     c_funding = Candle(
@@ -287,7 +305,15 @@ def test_backtest_emergency_loss_trigger(backtest_config: BacktestConfig) -> Non
         reason="Entry",
     )
     c_open = make_candle(0, "2700.0", "2705.0", "2695.0", "2700.0")
-    engine.exchange.process_order(intent, c_open)
+    trade = engine.exchange.process_order(intent, c_open)
+    assert trade is not None
+    engine.active_trade_meta[trade.trade_id] = {
+        "entry_score": Decimal("85.0"),
+        "regime": "BULL",
+        "entry_family": "TREND_PULLBACK",
+        "initial_stop": Decimal("2680.0"),
+        "initial_r": Decimal("20.0"),
+    }
 
     # Emergency loss limit in fixture is $400. Drop price by $450 to 2250.
     c_drop = make_candle(1, "2300.0", "2300.0", "2250.0", "2250.0")
@@ -367,7 +393,15 @@ def test_backtest_exit_manager_partial_tp_and_stop(
         reason="Entry",
     )
     c0 = make_candle(0, "2700.0", "2705.0", "2695.0", "2700.0")
-    engine.exchange.process_order(intent, c0)
+    trade = engine.exchange.process_order(intent, c0)
+    assert trade is not None
+    engine.active_trade_meta[trade.trade_id] = {
+        "entry_score": Decimal("85.0"),
+        "regime": "BULL",
+        "entry_family": "TREND_PULLBACK",
+        "initial_stop": Decimal("2680.0"),
+        "initial_r": Decimal("20.0"),
+    }
 
     # Mock exit manager to return PARTIAL_TP then EXIT
     mock_eval = MagicMock(

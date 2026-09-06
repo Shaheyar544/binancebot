@@ -129,6 +129,8 @@ class PerTradeDiagnostic(BaseModel):
     realized_r: Decimal
     mfe: Decimal
     mae: Decimal
+    mfe_r: Decimal = Decimal("0.0")
+    max_r_reached: Decimal = Decimal("0.0")
     mfe_capture_pct: Decimal
     gross_pnl: Decimal
     net_pnl: Decimal
@@ -167,6 +169,9 @@ class BacktestResult(BaseModel):
     target_hit_rates: dict[str, Decimal] = Field(default_factory=dict)
     trades: list[SimulatedTrade] = Field(default_factory=list)
 
+    # Liquidation model audit status
+    liquidation_model_status: str = "UNAVAILABLE"
+
     # Expanded statistical and execution metrics
     expectancy_per_trade: Decimal = Decimal("0.0")
     avg_winner: Decimal = Decimal("0.0")
@@ -175,6 +180,15 @@ class BacktestResult(BaseModel):
     median_loser: Decimal = Decimal("0.0")
     mae_avg: Decimal = Decimal("0.0")
     mfe_avg: Decimal = Decimal("0.0")
+    mfe_median: Decimal = Decimal("0.0")
+    mfe_r_avg: Decimal = Decimal("0.0")
+    max_r_reached: Decimal = Decimal("0.0")
+    r_realized_avg: Decimal = Decimal("0.0")
+    r_surrendered_avg: Decimal = Decimal("0.0")
+    mfe_realization_pct_winners: Decimal = Decimal("0.0")
+    giveback_pct: Decimal = Decimal("0.0")
+    r_target_hit_rates: dict[str, Decimal] = Field(default_factory=dict)
+    positive_mfe_closing_loser_pct: Decimal = Decimal("0.0")
     mfe_capture_pct: Decimal = Decimal("0.0")
     r_multiple_reached_avg: Decimal = Decimal("0.0")
     r_multiple_realized_avg: Decimal = Decimal("0.0")
