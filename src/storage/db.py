@@ -3,12 +3,13 @@
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from pathlib import Path
 
 import aiosqlite
 
-from src.domain.enums import DecisionState, MarketRegime
-from src.domain.models import DecisionSnapshot
+from src.domain.enums import DecisionState, MarketRegime, Timeframe
+from src.domain.models import Candle, DecisionSnapshot
 
 
 class DatabaseManager:
@@ -100,6 +101,25 @@ class DatabaseManager:
                 """
             )
 
+            # Table for canonical candles
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS candles (
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    open_time INTEGER NOT NULL,
+                    open TEXT NOT NULL,
+                    high TEXT NOT NULL,
+                    low TEXT NOT NULL,
+                    close TEXT NOT NULL,
+                    volume TEXT NOT NULL,
+                    close_time INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (symbol, timeframe, open_time)
+                );
+                """
+            )
+
             await conn.commit()
 
     async def save_decision_snapshot(self, snapshot: DecisionSnapshot) -> None:
@@ -155,3 +175,58 @@ class DatabaseManager:
                 reason=row[7],
                 source=row[8],
             )
+
+    async def save_candle(self, candle: Candle) -> None:
+        """Persist a completed canonical candle to SQLite."""
+        async with self.connection() as conn:
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO candles (
+                    symbol, timeframe, open_time, open, high, low, close, volume, close_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    candle.symbol,
+                    candle.timeframe.value,
+                    candle.open_time,
+                    str(candle.open),
+                    str(candle.high),
+                    str(candle.low),
+                    str(candle.close),
+                    str(candle.volume),
+                    candle.close_time,
+                ),
+            )
+            await conn.commit()
+
+    async def get_candles(
+        self, symbol: str, timeframe: Timeframe, limit: int = 500
+    ) -> list[Candle]:
+        """Retrieve historical candles for a symbol and timeframe sorted chronologically."""
+        async with self.connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT symbol, timeframe, open_time, open, high, low, close, volume, close_time
+                FROM candles
+                WHERE symbol = ? AND timeframe = ?
+                ORDER BY open_time ASC
+                LIMIT ?;
+                """,
+                (symbol, timeframe.value, limit),
+            )
+            rows = await cursor.fetchall()
+            return [
+                Candle(
+                    symbol=row[0],
+                    timeframe=Timeframe(row[1]),
+                    open_time=row[2],
+                    open=Decimal(row[3]),
+                    high=Decimal(row[4]),
+                    low=Decimal(row[5]),
+                    close=Decimal(row[6]),
+                    volume=Decimal(row[7]),
+                    close_time=row[8],
+                    is_closed=True,
+                )
+                for row in rows
+            ]
