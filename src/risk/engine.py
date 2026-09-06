@@ -30,14 +30,24 @@ class RiskEngine:
         self.estimator = estimator
         self.sizer = PositionSizer(filters=filters)
 
-    def is_emergency_loss_breached(self, position: PositionSnapshot) -> bool:
-        """Check if unrealized loss on position breaches emergency loss threshold."""
+    def is_emergency_loss_breached(
+        self,
+        position: PositionSnapshot,
+        fees_paid: Decimal = Decimal("0"),
+        funding_paid: Decimal = Decimal("0"),
+    ) -> bool:
+        """Check if total economic loss on position breaches emergency loss threshold."""
         if self.config.emergency_loss_limit is None:
             return False
+
+        # Economic loss = unrealized loss (if negative) + fees + funding paid
+        total_loss = Decimal("0")
         if position.unrealized_pnl < Decimal("0"):
-            loss = abs(position.unrealized_pnl)
-            return loss >= self.config.emergency_loss_limit
-        return False
+            total_loss += abs(position.unrealized_pnl)
+        total_loss += max(Decimal("0"), fees_paid)
+        total_loss += max(Decimal("0"), funding_paid)
+
+        return total_loss >= self.config.emergency_loss_limit
 
     def evaluate_entry(
         self,

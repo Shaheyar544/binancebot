@@ -45,3 +45,25 @@ def test_partial_score_below_threshold() -> None:
     # Total = 15 + 20 + 0 + 20 + 10 + 0 + 5 + 5 = 75
     assert breakdown.total_score == Decimal("75.0")
     assert breakdown.is_actionable(threshold=Decimal("85.0")) is False
+
+
+def test_gradient_scoring_evaluation() -> None:
+    """Gradient scoring accurately rewards partial technical alignment."""
+    scorer = StrategyScorer()
+    breakdown = scorer.calculate_gradient(
+        htf_1d_bullish=True,  # 15.0
+        htf_4h_bullish=True,  # 20.0
+        htf_1h_bullish=True,  # 20.0
+        setup_15m_bullish=True,  # 20.0
+        close_15m=Decimal("2750.0"),
+        ema_10=Decimal("2740.0"),
+        ema_20=Decimal("2730.0"),
+        ema_50=Decimal("2720.0"),
+        ema_200=Decimal("2760.0"),  # Close > 10 > 20 > 50 (strong alignment -> 8.0 pts)
+        rsi_1h=Decimal("58.0"),  # Optimal bull momentum -> 5.0 pts
+        volume_ratio_15m=Decimal("1.3"),  # Volume 1.2-1.5 -> 4.5 pts
+        favorable_rr=True,  # 5.0 pts
+    )
+    # Total = 15 + 20 + 20 + 20 + 8.0 + 5.0 + 4.5 + 5.0 = 97.5
+    assert breakdown.total_score == Decimal("97.5")
+    assert breakdown.is_actionable(threshold=Decimal("85.0")) is True

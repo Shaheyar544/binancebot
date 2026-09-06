@@ -260,3 +260,47 @@ class DatabaseManager:
                 )
                 for row in rows
             ]
+
+    async def record_order(
+        self,
+        order_id: str,
+        client_order_id: str,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: Decimal,
+        price: Decimal,
+        notional: Decimal,
+        is_dca: bool,
+        status: str,
+    ) -> None:
+        """Persist dispatched order details."""
+        async with self.connection() as conn:
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO orders (
+                    order_id, client_order_id, symbol, side, order_type,
+                    quantity, price, notional, is_dca, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    order_id,
+                    client_order_id,
+                    symbol,
+                    side,
+                    order_type,
+                    str(quantity),
+                    str(price),
+                    str(notional),
+                    1 if is_dca else 0,
+                    status,
+                ),
+            )
+            await conn.commit()
+
+    async def get_all_client_order_ids(self) -> set[str]:
+        """Retrieve all recorded client order IDs for idempotency recovery."""
+        async with self.connection() as conn:
+            cursor = await conn.execute("SELECT client_order_id FROM orders;")
+            rows = await cursor.fetchall()
+            return {row[0] for row in rows}

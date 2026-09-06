@@ -22,6 +22,33 @@ class PositionSizer:
         """Floor quantity to step_size to prevent accidental over-sizing."""
         return quantity.quantize(self.filters.step_size, rounding=ROUND_DOWN)
 
+    def calculate_risk_based_notional(
+        self,
+        entry_price: Decimal,
+        stop_price: Decimal,
+        allocated_funds: Decimal,
+        risk_per_trade_pct: Decimal,
+        leverage: Decimal = Decimal("1.0"),
+    ) -> Decimal:
+        """Calculate target notional based on monetary risk and stop loss distance:
+
+        allowed_risk = allocated_funds * (risk_per_trade_pct / 100)
+        risk_distance = entry_price - stop_price
+        target_notional = (allowed_risk / risk_distance) * entry_price
+        capped by allocated_funds * leverage
+        """
+        if entry_price <= stop_price:
+            raise ValueError(f"Entry ({entry_price}) must be higher than stop ({stop_price})")
+
+        allowed_risk = allocated_funds * (risk_per_trade_pct / Decimal("100.0"))
+        risk_distance = entry_price - stop_price
+        units = allowed_risk / risk_distance
+        target_notional = units * entry_price
+
+        # Cap by user max purchasing power (allocated_funds * leverage)
+        max_notional = allocated_funds * leverage
+        return min(target_notional, max_notional)
+
     def create_entry_intent(
         self,
         price: Decimal,
@@ -97,6 +124,32 @@ class PositionSizer:
             notional=actual_notional,
             is_dca=True,
             is_opening=True,
+            client_order_id=client_order_id,
+            reason=reason,
+        )
+
+    def create_exit_intent(
+        self,
+        price: Decimal,
+        quantity: Decimal,
+        client_order_id: str,
+        reason: str,
+        order_type: str = "LIMIT",
+    ) -> OrderIntent:
+        """Build a quantized long closing OrderIntent."""
+        quantized_price = self.quantize_price(price)
+        quantized_qty = self.quantize_quantity(quantity)
+        actual_notional = quantized_qty * quantized_price
+
+        return OrderIntent(
+            symbol=self.filters.symbol,
+            side=OrderSide.SELL,
+            order_type=order_type,
+            quantity=quantized_qty,
+            price=quantized_price,
+            notional=actual_notional,
+            is_dca=False,
+            is_opening=False,
             client_order_id=client_order_id,
             reason=reason,
         )

@@ -98,3 +98,40 @@ def test_calculate_volume_ratio() -> None:
     assert isinstance(ratio, Decimal)
     # Latest volume is 200, average is ~105, ratio ~1.9
     assert ratio > Decimal("1.8")
+
+
+def test_decimal_sqrt() -> None:
+    """Newton-Raphson square root accurately calculates roots with pure Decimal."""
+    from src.analysis.indicators import _decimal_sqrt
+
+    assert _decimal_sqrt(Decimal("0")) == Decimal("0")
+    assert round(_decimal_sqrt(Decimal("4")), 4) == Decimal("2.0000")
+    assert round(_decimal_sqrt(Decimal("2")), 4) == Decimal("1.4142")
+
+    with pytest.raises(ValueError, match="Cannot calculate square root of negative number"):
+        _decimal_sqrt(Decimal("-1"))
+
+
+def test_timeframe_analyzer_analysis_pipeline() -> None:
+    """TimeframeAnalyzer derives full TimeframeAnalysis and MultiTimeframeAnalysis correctly."""
+    from src.analysis.models import TimeframeAnalyzer
+
+    candles = [
+        make_candle(str(2700 + i), str(2705 + i), str(2695 + i), str(2702 + i)) for i in range(25)
+    ]
+    tf_analysis = TimeframeAnalyzer.analyze_timeframe(candles, Timeframe.M15)
+    assert tf_analysis.timeframe == Timeframe.M15
+    assert tf_analysis.is_bullish is True
+    assert tf_analysis.current_close == Decimal("2726")
+
+    # Multi timeframe aggregation
+    mtf = TimeframeAnalyzer.build_multi_timeframe_analysis(
+        symbol="XAUUSDT",
+        candles_1d=candles,
+        candles_4h=candles,
+        candles_1h=candles,
+        candles_15m=candles,
+    )
+    assert mtf.symbol == "XAUUSDT"
+    assert mtf.analysis_1d.is_bullish is True
+    assert mtf.analysis_15m.current_close == Decimal("2726")

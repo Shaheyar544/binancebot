@@ -60,3 +60,22 @@ async def test_no_order_placement_or_exchange_connection_in_this_phase(
         assert row[0] == 0
 
     assert status.live_execution_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_bot_application_run_cycle(tmp_path: Path) -> None:
+    """BotApplication.run executes clean autonomous cycle and completes without error."""
+    db_path = str(tmp_path / "cycle_test.db")
+    config = BotConfig(
+        gates=ExecutionGateConfig(live_trading=False, enable_order_execution=False),
+        risk=UserRiskConfig(
+            allocated_funds=Decimal("1000.00"),
+            leverage=Decimal("3.0"),
+            max_acceptable_liquidation_price=Decimal("1800.00"),
+        ),
+        database_path=db_path,
+    )
+    app = BotApplication(config)
+    # Run exactly 1 autonomous cycle
+    await app.run(max_cycles=1)
+    assert Path(db_path).exists()

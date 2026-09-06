@@ -18,6 +18,17 @@ class StructureBreak(StrEnum):
     BULLISH_BOS = "BULLISH_BOS"
     BEARISH_BOS = "BEARISH_BOS"
     CHOCH = "CHOCH"
+    BULLISH_TO_BEARISH_CHOCH = "BULLISH_TO_BEARISH_CHOCH"
+    BEARISH_TO_BULLISH_CHOCH = "BEARISH_TO_BULLISH_CHOCH"
+
+
+# Configurable timeframe-aware swing detection windows
+DEFAULT_SWING_WINDOWS: dict[str, int] = {
+    "15m": 2,
+    "1h": 3,
+    "4h": 4,
+    "1d": 5,
+}
 
 
 class SwingPoint(BaseModel):
@@ -80,7 +91,13 @@ def detect_structure_breaks(
     candles: Sequence[Candle],
     swings: Sequence[SwingPoint],
 ) -> list[StructureBreak]:
-    """Detect Break of Structure (BOS) or Change of Character (CHoCH)."""
+    """Detect Break of Structure (BOS) or Change of Character (CHoCH).
+
+    - Bullish BOS: in uptrend (HH, HL), price breaks above prior swing high.
+    - Bearish BOS: in downtrend (LH, LL), price breaks below prior swing low.
+    - Bullish-to-Bearish CHoCH: price breaks below recent swing low.
+    - Bearish-to-Bullish CHoCH: price breaks above recent swing high.
+    """
     breaks: list[StructureBreak] = []
     if not candles or not swings:
         return breaks
@@ -90,15 +107,25 @@ def detect_structure_breaks(
 
     latest_candle = candles[-1]
 
+    # Check breaks above swing high
     if recent_highs:
         last_high = recent_highs[-1]
         if latest_candle.close > last_high.price:
             breaks.append(StructureBreak.BULLISH_BOS)
+            # If prior structure was downtrend (LH sequence), breaking above last high is also CHoCH
+            if len(recent_highs) >= 2 and recent_highs[-1].price < recent_highs[-2].price:
+                breaks.append(StructureBreak.CHOCH)
+                breaks.append(StructureBreak.BEARISH_TO_BULLISH_CHOCH)
 
+    # Check breaks below swing low
     if recent_lows:
         last_low = recent_lows[-1]
         if latest_candle.close < last_low.price:
             breaks.append(StructureBreak.BEARISH_BOS)
+            # If prior structure was uptrend (HL sequence), breaking below last low is also CHoCH
+            if len(recent_lows) >= 2 and recent_lows[-1].price > recent_lows[-2].price:
+                breaks.append(StructureBreak.CHOCH)
+                breaks.append(StructureBreak.BULLISH_TO_BEARISH_CHOCH)
 
     return breaks
 

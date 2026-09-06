@@ -123,9 +123,7 @@ class BinanceFuturesLiveAdapter:
 
         data = resp.json()
         status = (
-            ExecutionStatus.FILLED
-            if data.get("status") == "FILLED"
-            else ExecutionStatus.SUBMITTED
+            ExecutionStatus.FILLED if data.get("status") == "FILLED" else ExecutionStatus.SUBMITTED
         )
         return OrderExecutionResult(
             client_order_id=intent.client_order_id,

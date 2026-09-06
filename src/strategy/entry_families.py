@@ -102,3 +102,61 @@ class TrendPullbackDetector:
                 )
 
         return None
+
+
+class EntryOrchestrator:
+    """Orchestrates dynamic support/resistance level identification and tactical entry detectors."""
+
+    def __init__(self) -> None:
+        self.breakout_detector = BreakoutRetestDetector()
+        self.reclaim_detector = SupportReclaimDetector()
+        self.pullback_detector = TrendPullbackDetector()
+
+    def identify_levels(
+        self,
+        candles: Sequence[Candle],
+        window: int = 2,
+    ) -> tuple[Decimal | None, Decimal | None]:
+        """Derive latest valid swing support and swing resistance levels from candle history."""
+        from src.analysis.structure import SwingType, find_swing_points
+
+        swings = find_swing_points(candles, window=window)
+        highs = [s for s in swings if s.swing_type == SwingType.SWING_HIGH]
+        lows = [s for s in swings if s.swing_type == SwingType.SWING_LOW]
+
+        recent_resistance = highs[-1].price if highs else None
+        recent_support = lows[-1].price if lows else None
+        return recent_support, recent_resistance
+
+    def evaluate_setups(
+        self,
+        candles_15m: Sequence[Candle],
+        ema_20: Decimal,
+        ema_50: Decimal,
+        support_level: Decimal | None = None,
+        resistance_level: Decimal | None = None,
+    ) -> EntrySetup | None:
+        """Evaluate all candidate entry families against latest 15M candles and derived levels."""
+        if not candles_15m:
+            return None
+
+        latest_candle = candles_15m[-1]
+
+        # 1. Check Breakout-Retest if resistance level is available
+        if resistance_level is not None and len(candles_15m) >= 2:
+            setup = self.breakout_detector.evaluate(candles_15m, resistance_level)
+            if setup is not None:
+                return setup
+
+        # 2. Check Support Reclaim if support level is available
+        if support_level is not None:
+            setup = self.reclaim_detector.evaluate(latest_candle, support_level)
+            if setup is not None:
+                return setup
+
+        # 3. Check Trend Pullback into EMA 20/50
+        setup = self.pullback_detector.evaluate(latest_candle, ema_20, ema_50)
+        if setup is not None:
+            return setup
+
+        return None

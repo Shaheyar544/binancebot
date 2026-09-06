@@ -101,3 +101,39 @@ def test_detect_liquidity_sweep() -> None:
     # Wick dips to 2672 (below 2680), but close is 2684 (above 2680)
     sweep_candle = make_candle(2, "2682.0", "2688.0", "2672.0", "2684.0")
     assert detect_liquidity_sweep(sweep_candle, swings) is True
+
+
+def test_detect_bearish_to_bullish_choch() -> None:
+    """Breaking above recent lower high in a downtrend sequence triggers CHoCH."""
+    swings = [
+        SwingPoint(
+            index=1, timestamp=1000, price=Decimal("2750.0"), swing_type=SwingType.SWING_HIGH
+        ),
+        SwingPoint(
+            index=3, timestamp=3000, price=Decimal("2720.0"), swing_type=SwingType.SWING_HIGH
+        ),
+    ]
+    # Candle closing above 2720 (most recent lower high)
+    candles = [make_candle(4, "2715.0", "2730.0", "2710.0", "2725.0")]
+    breaks = detect_structure_breaks(candles, swings)
+    assert StructureBreak.BULLISH_BOS in breaks
+    assert StructureBreak.CHOCH in breaks
+    assert StructureBreak.BEARISH_TO_BULLISH_CHOCH in breaks
+
+
+def test_detect_bullish_to_bearish_choch() -> None:
+    """Breaking below recent higher low in an uptrend sequence triggers CHoCH."""
+    swings = [
+        SwingPoint(
+            index=1, timestamp=1000, price=Decimal("2680.0"), swing_type=SwingType.SWING_LOW
+        ),
+        SwingPoint(
+            index=3, timestamp=3000, price=Decimal("2700.0"), swing_type=SwingType.SWING_LOW
+        ),
+    ]
+    # Candle closing below 2700 (most recent higher low)
+    candles = [make_candle(4, "2705.0", "2708.0", "2690.0", "2695.0")]
+    breaks = detect_structure_breaks(candles, swings)
+    assert StructureBreak.BEARISH_BOS in breaks
+    assert StructureBreak.CHOCH in breaks
+    assert StructureBreak.BULLISH_TO_BEARISH_CHOCH in breaks

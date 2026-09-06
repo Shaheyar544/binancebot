@@ -96,3 +96,280 @@ def test_backtest_run_metrics(backtest_config: BacktestConfig) -> None:
     assert result.total_trades == 0
     assert result.win_rate == Decimal("0.0")
     assert result.net_profit == Decimal("0.0")
+
+
+def test_resample_candles_completed_only() -> None:
+    """Only fully completed target timeframe buckets are emitted."""
+    from src.backtest.engine import resample_candles
+
+    # 4 15M candles span exactly 1 hour (0 to 3600000)
+    candles = [
+        make_candle(0, "2700.0", "2705.0", "2695.0", "2702.0"),
+        make_candle(1, "2702.0", "2710.0", "2701.0", "2708.0"),
+        make_candle(2, "2708.0", "2715.0", "2705.0", "2712.0"),
+        make_candle(3, "2712.0", "2720.0", "2710.0", "2718.0"),
+    ]
+    # With 3 candles, 1H bucket is incomplete -> 0 1H candles
+    res_3 = resample_candles(candles[:3], Timeframe.H1)
+    assert len(res_3) == 0
+
+    # With 4 candles, 1H bucket completes -> 1 1H candle
+    res_4 = resample_candles(candles, Timeframe.H1)
+    assert len(res_4) == 1
+    assert res_4[0].open == Decimal("2700.0")
+    assert res_4[0].high == Decimal("2720.0")
+    assert res_4[0].low == Decimal("2695.0")
+    assert res_4[0].close == Decimal("2718.0")
+    assert res_4[0].timeframe == Timeframe.H1
+
+
+def test_backtest_end_to_end_bull_trend(backtest_config: BacktestConfig) -> None:
+    """In a continuous bull trend, the engine enters and exits safely, calculating all metrics."""
+    from src.backtest.stress import generate_bull_trend_candles
+
+    candles = generate_bull_trend_candles(start_price=Decimal("2700.0"), num_candles=30)
+    engine = BacktestEngine(config=backtest_config)
+    result = engine.run(candles)
+
+    # Result contains comprehensive performance summary
+    assert isinstance(result.expectancy, Decimal)
+    assert isinstance(result.sharpe_ratio, Decimal)
+    assert isinstance(result.sortino_ratio, Decimal)
+    assert isinstance(result.calmar_ratio, Decimal)
+    assert "$5" in result.target_hit_rates
+    assert "$10" in result.target_hit_rates
+
+
+def test_backtest_liquidation_trigger(backtest_config: BacktestConfig) -> None:
+    """Flash crash triggers simulated liquidation check."""
+    from src.backtest.stress import generate_flash_crash_candles
+    from src.domain.enums import OrderSide
+    from src.domain.models import OrderIntent
+
+    engine = BacktestEngine(config=backtest_config)
+    # Open an initial long position manually
+    intent = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="LIMIT",
+        quantity=Decimal("1.0"),
+        price=Decimal("2700.0"),
+        notional=Decimal("2700.0"),
+        is_dca=False,
+        is_opening=True,
+        client_order_id="TEST_OPEN",
+        reason="Manual open for liquidation test",
+    )
+    candle_entry = make_candle(0, "2700.0", "2705.0", "2695.0", "2700.0")
+    engine.exchange.process_order(intent, candle_entry)
+    assert engine.exchange.has_open_position()
+
+    # Flash crash 25% down will breach liquidation price
+    crash_candles = generate_flash_crash_candles(
+        start_price=Decimal("2700.0"), drop_pct=Decimal("0.25"), num_candles=5
+    )
+    result = engine.run(crash_candles)
+    assert result.liquidations_count >= 1
+
+
+def test_standard_liquidation_estimator_edge_cases() -> None:
+    """Estimator returns 0 for non-positive leverage."""
+    from src.backtest.engine import StandardLiquidationEstimator
+
+    est = StandardLiquidationEstimator()
+    res0 = est.estimate_liquidation_price(Decimal("2700"), Decimal("0"), Decimal("1000"))
+    assert res0 == Decimal("0")
+    res_neg = est.estimate_liquidation_price(Decimal("2700"), Decimal("-1"), Decimal("1000"))
+    assert res_neg == Decimal("0")
+
+
+def test_resample_candles_edge_cases() -> None:
+    """Empty candles and M15 target timeframe return correctly."""
+    from src.backtest.engine import resample_candles
+
+    assert resample_candles([], Timeframe.H1) == []
+    c = make_candle(0, "2700.0", "2705.0", "2695.0", "2700.0")
+    assert resample_candles([c], Timeframe.M15) == [c]
+
+
+def test_get_historical_slice_invalid_index(backtest_config: BacktestConfig) -> None:
+    """Invalid index raises ValueError."""
+    engine = BacktestEngine(config=backtest_config)
+    candles = [make_candle(0, "2700.0", "2705.0", "2695.0", "2700.0")]
+    with pytest.raises(ValueError, match="Invalid index"):
+        engine.get_historical_slice(candles, current_idx=-1)
+    with pytest.raises(ValueError, match="Invalid index"):
+        engine.get_historical_slice(candles, current_idx=2)
+
+
+def test_backtest_empty_run(backtest_config: BacktestConfig) -> None:
+    """Running backtest on empty candles returns default BacktestResult."""
+    engine = BacktestEngine(config=backtest_config)
+    res = engine.run([])
+    assert res.total_trades == 0
+
+
+def test_backtest_funding_application(backtest_config: BacktestConfig) -> None:
+    """When open position crosses 8h boundary, funding is applied."""
+    from src.domain.enums import OrderSide
+    from src.domain.models import OrderIntent
+
+    engine = BacktestEngine(config=backtest_config)
+    intent = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="LIMIT",
+        quantity=Decimal("1.0"),
+        price=Decimal("2700.0"),
+        notional=Decimal("2700.0"),
+        is_dca=False,
+        is_opening=True,
+        client_order_id="BUY_FUND",
+        reason="Entry",
+    )
+    # Candle open_time divisible by 28,800,000 (8h boundary)
+    c_open = make_candle(0, "2700.0", "2710.0", "2690.0", "2705.0")
+    engine.exchange.process_order(intent, c_open)
+
+    # Candle crossing boundary at t = 28800000
+    c_funding = Candle(
+        symbol="XAUUSDT",
+        timeframe=Timeframe.M15,
+        open_time=28800000,
+        open=Decimal("2705.0"),
+        high=Decimal("2710.0"),
+        low=Decimal("2700.0"),
+        close=Decimal("2705.0"),
+        volume=Decimal("100.0"),
+        close_time=28800000 + 899999,
+        is_closed=True,
+    )
+    engine.run([c_funding])
+    assert engine.exchange.total_funding_paid > Decimal("0")
+
+
+def test_backtest_emergency_loss_trigger(backtest_config: BacktestConfig) -> None:
+    """When position economic loss exceeds emergency limit, position is closed immediately."""
+    from src.domain.enums import OrderSide
+    from src.domain.models import OrderIntent
+
+    engine = BacktestEngine(config=backtest_config)
+    intent = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="LIMIT",
+        quantity=Decimal("1.0"),
+        price=Decimal("2700.0"),
+        notional=Decimal("2700.0"),
+        is_dca=False,
+        is_opening=True,
+        client_order_id="BUY_EMERGENCY",
+        reason="Entry",
+    )
+    c_open = make_candle(0, "2700.0", "2705.0", "2695.0", "2700.0")
+    engine.exchange.process_order(intent, c_open)
+
+    # Emergency loss limit in fixture is $400. Drop price by $450 to 2250.
+    c_drop = make_candle(1, "2300.0", "2300.0", "2250.0", "2250.0")
+    engine.run([c_drop])
+    assert not engine.exchange.has_open_position()
+
+
+def test_backtest_entry_pipeline_execution(
+    backtest_config: BacktestConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Strategy BUY decision passes risk checks, enters trade, and tracks stops."""
+    from unittest.mock import MagicMock
+
+    from src.domain.enums import DecisionState, MarketRegime
+    from src.domain.models import DecisionSnapshot
+    from src.strategy.entry_families import EntryFamily, EntrySetup
+
+    mock_strat = MagicMock()
+    mock_strat.evaluate.return_value = DecisionSnapshot(
+        decision_id="mock_buy",
+        symbol="XAUUSDT",
+        timestamp=1700000000000,
+        decision_state=DecisionState.BUY,
+        regime=MarketRegime.STRONG_BULL,
+        reason="Mock confluence buy",
+    )
+    engine = BacktestEngine(config=backtest_config, strategy_engine=mock_strat)
+    monkeypatch.setattr(
+        engine.orchestrator,
+        "evaluate_setups",
+        MagicMock(
+            return_value=EntrySetup(
+                family=EntryFamily.TREND_PULLBACK,
+                level=Decimal("2700.0"),
+                stop_loss_ref=Decimal("2680.0"),
+            )
+        ),
+    )
+
+    candles = [make_candle(i, "2700.0", "2710.0", "2690.0", "2705.0") for i in range(25)]
+    result = engine.run(candles)
+
+    assert result.total_trades > 0
+    assert engine.exchange.has_open_position() is False  # Closed at end of backtest
+
+
+def test_backtest_exit_manager_partial_tp_and_stop(
+    backtest_config: BacktestConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Position hits partial take-profit, then exits at structural stop."""
+    from unittest.mock import MagicMock
+
+    from src.domain.enums import DecisionState
+    from src.strategy.engine import ExitDecision
+
+    engine = BacktestEngine(config=backtest_config)
+    # Open initial position
+    from src.domain.enums import OrderSide
+    from src.domain.models import OrderIntent
+
+    intent = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="LIMIT",
+        quantity=Decimal("1.0"),
+        price=Decimal("2700.0"),
+        notional=Decimal("2700.0"),
+        is_dca=False,
+        is_opening=True,
+        client_order_id="BUY_EXIT_TEST",
+        reason="Entry",
+    )
+    c0 = make_candle(0, "2700.0", "2705.0", "2695.0", "2700.0")
+    engine.exchange.process_order(intent, c0)
+
+    # Mock exit manager to return PARTIAL_TP then EXIT
+    mock_eval = MagicMock(
+        side_effect=[
+            ExitDecision(
+                should_exit=True,
+                exit_state=DecisionState.PARTIAL_TP,
+                reason="Partial TP reached",
+                trigger_price=Decimal("2730.0"),
+                current_price=Decimal("2730.0"),
+                portion_pct=Decimal("50.0"),
+            ),
+            ExitDecision(
+                should_exit=True,
+                exit_state=DecisionState.EXIT,
+                reason="Stop loss hit",
+                trigger_price=Decimal("2680.0"),
+                current_price=Decimal("2675.0"),
+                portion_pct=Decimal("100.0"),
+            ),
+        ]
+    )
+    monkeypatch.setattr(engine.exit_manager, "evaluate_position", mock_eval)
+
+    # Run over 2 candles: first triggers partial TP, second triggers stop EXIT
+    c1 = make_candle(1, "2700.0", "2735.0", "2695.0", "2730.0")
+    c2 = make_candle(2, "2730.0", "2730.0", "2670.0", "2675.0")
+
+    # Manually seed current_stop_loss via candle evaluation
+    result = engine.run([c1, c2])
+    assert len(result.trades) >= 1

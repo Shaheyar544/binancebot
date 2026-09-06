@@ -27,26 +27,44 @@ class RegimeClassifier:
         if avg_atr > Decimal("0") and atr >= avg_atr * self.volatility_expansion_multiplier:
             return MarketRegime.HIGH_VOLATILITY
 
-        # Bullish EMA alignment
-        is_bull_alignment = (
+        # Perfect full Bullish EMA alignment (10 > 20 > 50 > 200)
+        is_full_bull_alignment = (
             current_close > ema_10 and ema_10 > ema_20 and ema_20 > ema_50 and ema_50 > ema_200
         )
 
-        # Bearish EMA alignment
-        is_bear_alignment = (
+        # Moderate Bullish EMA alignment (close > 20 > 50)
+        is_moderate_bull = current_close > ema_20 and ema_20 > ema_50
+
+        # Perfect full Bearish EMA alignment (10 < 20 < 50 < 200)
+        is_full_bear_alignment = (
             current_close < ema_10 and ema_10 < ema_20 and ema_20 < ema_50 and ema_50 < ema_200
         )
 
-        if is_bull_alignment and is_bullish_structure:
+        # Moderate Bearish EMA alignment (close < 20 < 50)
+        is_moderate_bear = current_close < ema_20 and ema_20 < ema_50
+
+        # 1. Strong Bull: Full EMA alignment + confirmed bullish structure
+        if is_full_bull_alignment and is_bullish_structure:
             return MarketRegime.STRONG_BULL
 
-        if is_bear_alignment and not is_bullish_structure:
+        # 2. Bull: Moderate/Full EMA alignment + bullish structure
+        if is_moderate_bull and is_bullish_structure:
+            return MarketRegime.BULL
+
+        # 3. Strong Bear: Full Bearish EMA alignment + bearish structure
+        if is_full_bear_alignment and not is_bullish_structure:
             return MarketRegime.STRONG_BEAR
 
-        if is_bear_alignment or (current_close < ema_50 and not is_bullish_structure):
+        # 4. Bear: Moderate/Full Bearish alignment + bearish structure
+        if is_moderate_bear and not is_bullish_structure:
             return MarketRegime.BEAR
 
-        if is_bull_alignment or (current_close > ema_50 and is_bullish_structure):
+        # 5. Bullish Range: Price above EMA 50, but structure or EMA alignment is mixed/ranging
+        if current_close > ema_50 and is_bullish_structure:
             return MarketRegime.BULLISH_RANGE
+
+        # 6. Bearish Range: Price below EMA 50, but structure or EMA alignment is mixed/ranging
+        if current_close < ema_50 and not is_bullish_structure:
+            return MarketRegime.BEARISH_RANGE
 
         return MarketRegime.NEUTRAL

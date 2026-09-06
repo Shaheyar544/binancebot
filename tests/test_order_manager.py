@@ -9,7 +9,7 @@ from src.domain.enums import OrderSide
 from src.domain.models import OrderIntent
 from src.exchange.metadata import SymbolFilters
 from src.execution.adapter import FakeExchangeAdapter
-from src.execution.models import ExecutionStatus
+from src.execution.models import ExecutionStatus, OrderExecutionResult
 from src.execution.order_manager import OrderManager
 from src.risk.engine import RiskEngine
 
@@ -149,3 +149,65 @@ async def test_orders_blocked_during_reconciliation(
 
     with pytest.raises(RuntimeError, match="Order submission blocked: state reconciliation active"):
         await order_manager.dispatch_order(intent)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_with_protective_stop_success(
+    base_risk_config: UserRiskConfig,
+    xau_filters: SymbolFilters,
+    fake_adapter: FakeExchangeAdapter,
+) -> None:
+    """When entry fills, protective stop order is immediately placed."""
+    risk_engine = RiskEngine(
+        config=base_risk_config,
+        filters=xau_filters,
+        estimator=StubLiquidationEstimator(),
+    )
+    order_manager = OrderManager(
+        gates=ExecutionGateConfig(live_trading=True, enable_order_execution=True),
+        risk_engine=risk_engine,
+        adapter=fake_adapter,
+    )
+
+    intent = make_order_intent("ENTRY_WITH_STOP_1")
+    entry_res, stop_res = await order_manager.dispatch_with_protective_stop(
+        entry_intent=intent,
+        stop_price=Decimal("2685.00"),
+    )
+
+    assert entry_res.status == ExecutionStatus.FILLED
+    assert stop_res is not None
+    assert stop_res.status == ExecutionStatus.FILLED
+    assert "STOP_ENTRY_WITH_STOP_1" in stop_res.client_order_id
+
+
+@pytest.mark.asyncio
+async def test_dispatch_with_protective_stop_failure_emergency(
+    base_risk_config: UserRiskConfig,
+    xau_filters: SymbolFilters,
+) -> None:
+    """If entry fills but protective stop fails, system raises emergency protection failure."""
+
+    class FailingStopAdapter(FakeExchangeAdapter):
+        async def submit_order(self, intent: OrderIntent) -> OrderExecutionResult:
+            if "STOP_" in intent.client_order_id:
+                raise RuntimeError("Binance rejected stop order: filter failure")
+            return await super().submit_order(intent)
+
+    risk_engine = RiskEngine(
+        config=base_risk_config,
+        filters=xau_filters,
+        estimator=StubLiquidationEstimator(),
+    )
+    order_manager = OrderManager(
+        gates=ExecutionGateConfig(live_trading=True, enable_order_execution=True),
+        risk_engine=risk_engine,
+        adapter=FailingStopAdapter(),
+    )
+
+    intent = make_order_intent("ENTRY_PROT_FAIL")
+    with pytest.raises(RuntimeError, match="Emergency protection failure"):
+        await order_manager.dispatch_with_protective_stop(
+            entry_intent=intent,
+            stop_price=Decimal("2685.00"),
+        )

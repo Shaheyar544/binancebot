@@ -1,6 +1,5 @@
 """Deterministic technical indicator calculations using Python Decimal."""
 
-import math
 from decimal import Decimal
 
 from src.domain.models import Candle
@@ -85,8 +84,29 @@ def calculate_macd(
     return (round(macd_line, 4), round(signal_line, 4), round(hist, 4))
 
 
+def _decimal_sqrt(val: Decimal, precision: int = 6) -> Decimal:
+    """Compute square root of a Decimal using Newton-Raphson method."""
+    if val < Decimal("0"):
+        raise ValueError("Cannot calculate square root of negative number")
+    if val == Decimal("0"):
+        return Decimal("0")
+
+    # Initial guess
+    x = val / Decimal("2")
+    if x == Decimal("0"):
+        x = Decimal("1")
+
+    # Newton-Raphson iteration
+    for _ in range(30):
+        next_x = (x + val / x) / Decimal("2")
+        if abs(next_x - x) < Decimal(10) ** (-precision):
+            return next_x
+        x = next_x
+    return x
+
+
 def calculate_atr(candles: list[Candle], period: int = 14) -> Decimal:
-    """Calculate Average True Range (ATR) for volatility measurement."""
+    """Calculate Average True Range (ATR) using Wilder's smoothing."""
     if len(candles) < period:
         raise ValueError(
             f"Insufficient candles for ATR-{period}: got {len(candles)}, need at least {period}"
@@ -106,16 +126,22 @@ def calculate_atr(candles: list[Candle], period: int = 14) -> Decimal:
             )
         tr_list.append(tr)
 
-    # Simple smoothed average over the period
-    recent_tr = tr_list[-period:]
-    atr = sum(recent_tr, Decimal("0")) / Decimal(str(period))
-    return round(atr, 2)
+    # Initial ATR is simple average of first `period` true ranges
+    current_atr = sum(tr_list[:period], Decimal("0")) / Decimal(str(period))
+
+    # Wilder's recursive smoothing
+    period_dec = Decimal(str(period))
+    period_minus_one = Decimal(str(period - 1))
+    for tr in tr_list[period:]:
+        current_atr = (current_atr * period_minus_one + tr) / period_dec
+
+    return round(current_atr, 2)
 
 
 def calculate_bollinger_bands(
     prices: list[Decimal], period: int = 20, num_std: float = 2.0
 ) -> tuple[Decimal, Decimal, Decimal]:
-    """Calculate Bollinger Bands (upper, middle, lower)."""
+    """Calculate Bollinger Bands (upper, middle, lower) with pure Decimal precision."""
     if len(prices) < period:
         raise ValueError(
             f"Insufficient data points for Bollinger Bands: "
@@ -125,9 +151,9 @@ def calculate_bollinger_bands(
     subset = prices[-period:]
     middle = sum(subset, Decimal("0")) / Decimal(str(period))
 
-    # Variance
+    # Variance with Decimal
     variance = sum(((p - middle) ** 2 for p in subset), Decimal("0")) / Decimal(str(period))
-    std_dev = Decimal(str(round(math.sqrt(float(variance)), 4)))
+    std_dev = _decimal_sqrt(variance, precision=6)
 
     multiplier = Decimal(str(num_std))
     upper = middle + (std_dev * multiplier)

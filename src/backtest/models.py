@@ -58,4 +58,14 @@ class BacktestResult(BaseModel):
     total_fees: Decimal = Decimal("0.0")
     total_funding: Decimal = Decimal("0.0")
     liquidations_count: int = 0
+    expectancy: Decimal = Decimal("0.0")
+    sharpe_ratio: Decimal = Decimal("0.0")
+    sortino_ratio: Decimal = Decimal("0.0")
+    calmar_ratio: Decimal = Decimal("0.0")
+    consecutive_wins: int = 0
+    consecutive_losses: int = 0
+    max_exposure: Decimal = Decimal("0.0")
+    max_adds: int = 0
+    avg_holding_time_ms: int = 0
+    target_hit_rates: dict[str, Decimal] = Field(default_factory=dict)
     trades: list[SimulatedTrade] = Field(default_factory=list)

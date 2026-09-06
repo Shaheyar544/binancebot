@@ -82,3 +82,33 @@ def test_classify_bullish_range_and_neutral_regimes() -> None:
         is_bullish_structure=False,
     )
     assert neutral_regime == MarketRegime.NEUTRAL
+
+
+def test_classify_bull_and_bearish_range() -> None:
+    """Test classification of BULL and BEARISH_RANGE regimes."""
+    classifier = RegimeClassifier()
+    # BULL: moderate bull alignment (close > 20 > 50) + bullish structure
+    bull_regime = classifier.classify(
+        ema_10=Decimal("2710.0"),  # 10 is briefly dipping below close
+        ema_20=Decimal("2700.0"),
+        ema_50=Decimal("2680.0"),
+        ema_200=Decimal("2720.0"),  # 200 is above, but short-medium is bull
+        current_close=Decimal("2715.0"),
+        atr=Decimal("15.0"),
+        avg_atr=Decimal("15.0"),
+        is_bullish_structure=True,
+    )
+    assert bull_regime == MarketRegime.BULL
+
+    # BEARISH_RANGE: price below EMA 50 with bearish structure, but mixed EMAs
+    bear_range = classifier.classify(
+        ema_10=Decimal("2690.0"),
+        ema_20=Decimal("2685.0"),
+        ema_50=Decimal("2700.0"),
+        ema_200=Decimal("2650.0"),
+        current_close=Decimal("2692.0"),  # below 50
+        atr=Decimal("15.0"),
+        avg_atr=Decimal("15.0"),
+        is_bullish_structure=False,
+    )
+    assert bear_range == MarketRegime.BEARISH_RANGE

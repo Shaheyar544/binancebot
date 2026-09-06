@@ -128,3 +128,122 @@ def test_simulated_exchange_funding_accrual(backtest_config: BacktestConfig) -> 
         funding_rate=Decimal("0.0001"),
     )
     assert exchange.total_funding_paid > Decimal("0")
+
+
+def test_simulated_exchange_dca_addition(backtest_config: BacktestConfig) -> None:
+    """DCA addition updates position size and average entry price."""
+    exchange = SimulatedExchange(config=backtest_config)
+    candle1 = make_candle("2700.00", "2710.00", "2690.00", "2700.00")
+    intent1 = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="LIMIT",
+        quantity=Decimal("0.100"),
+        price=Decimal("2700.00"),
+        notional=Decimal("270.00"),
+        is_dca=False,
+        is_opening=True,
+        client_order_id="BUY_INIT",
+        reason="Initial entry",
+    )
+    exchange.process_order(intent1, candle1)
+
+    # DCA order at 2650
+    candle2 = make_candle("2660.00", "2670.00", "2640.00", "2650.00")
+    intent2 = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="LIMIT",
+        quantity=Decimal("0.100"),
+        price=Decimal("2650.00"),
+        notional=Decimal("265.00"),
+        is_dca=True,
+        is_opening=True,
+        client_order_id="BUY_DCA",
+        reason="DCA entry",
+    )
+    trade_dca = exchange.process_order(intent2, candle2)
+    assert trade_dca is not None
+    assert exchange.position is not None
+    assert exchange.position.size == Decimal("0.200")
+    assert exchange.position.entry_price < Decimal("2700.00")
+
+
+def test_simulated_exchange_sell_full_and_partial(backtest_config: BacktestConfig) -> None:
+    """SELL order executes partial or full exit and tracks realized P&L and excursions."""
+    exchange = SimulatedExchange(config=backtest_config)
+    candle1 = make_candle("2700.00", "2710.00", "2690.00", "2700.00")
+    intent_buy = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="LIMIT",
+        quantity=Decimal("1.0"),
+        price=Decimal("2700.00"),
+        notional=Decimal("2700.00"),
+        is_dca=False,
+        is_opening=True,
+        client_order_id="BUY_FOR_SELL",
+        reason="Entry",
+    )
+    exchange.process_order(intent_buy, candle1)
+
+    # Update excursions on high candle
+    candle2 = make_candle("2700.00", "2750.00", "2680.00", "2740.00")
+    exchange.update_excursions(candle2)
+    assert exchange.active_trade is not None
+    assert exchange.active_trade.max_favorable_excursion > Decimal("0")
+    assert exchange.active_trade.max_adverse_excursion > Decimal("0")
+
+    # Partial SELL limit at 2730
+    intent_sell_partial = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.SELL,
+        order_type="LIMIT",
+        quantity=Decimal("0.5"),
+        price=Decimal("2730.00"),
+        notional=Decimal("1365.00"),
+        is_dca=False,
+        is_opening=False,
+        client_order_id="SELL_PARTIAL",
+        reason="Partial TP",
+    )
+    exchange.process_order(intent_sell_partial, candle2)
+    assert exchange.has_open_position()
+    assert exchange.position is not None
+    assert exchange.position.size == Decimal("0.5")
+
+    # Limit SELL at 2800 cannot fill if candle high < 2800
+    candle3 = make_candle("2740.00", "2760.00", "2730.00", "2750.00")
+    intent_unfillable = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.SELL,
+        order_type="LIMIT",
+        quantity=Decimal("0.5"),
+        price=Decimal("2800.00"),
+        notional=Decimal("1400.00"),
+        is_dca=False,
+        is_opening=False,
+        client_order_id="SELL_UNFILLABLE",
+        reason="Unfillable TP",
+    )
+    res = exchange.process_order(intent_unfillable, candle3)
+    assert res is None
+    assert exchange.position.size == Decimal("0.5")
+
+    # Full exit market order
+    intent_full = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.SELL,
+        order_type="MARKET",
+        quantity=Decimal("0.5"),
+        price=Decimal("2750.00"),
+        notional=Decimal("1375.00"),
+        is_dca=False,
+        is_opening=False,
+        client_order_id="SELL_FULL",
+        reason="Full exit",
+    )
+    exchange.process_order(intent_full, candle3)
+    assert not exchange.has_open_position()
+    assert len(exchange.closed_trades) == 1
+    assert exchange.closed_trades[0].realized_pnl > Decimal("0")

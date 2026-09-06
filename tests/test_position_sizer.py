@@ -98,3 +98,19 @@ def test_sub_min_notional_rejected(xau_filters: SymbolFilters) -> None:
             client_order_id="ENTRY_TOO_SMALL",
             reason="Sub min notional",
         )
+
+
+def test_risk_based_notional_calculation(xau_filters: SymbolFilters) -> None:
+    """Calculate target notional based on risk-per-trade percentage and stop distance."""
+    sizer = PositionSizer(filters=xau_filters)
+    # Entry = 2700, Stop = 2673 (Risk = 27, 1% of price).
+    # Allocated = 1000, Risk % = 2% -> Monetary risk = $20.
+    # Target notional = (20 / 27) * 2700 = $2000.
+    notional = sizer.calculate_risk_based_notional(
+        entry_price=Decimal("2700.00"),
+        stop_price=Decimal("2673.00"),
+        allocated_funds=Decimal("1000.00"),
+        risk_per_trade_pct=Decimal("2.0"),
+        leverage=Decimal("3.0"),  # max notional = 3000
+    )
+    assert notional == Decimal("2000.00")
