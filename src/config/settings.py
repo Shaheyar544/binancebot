@@ -74,6 +74,12 @@ class UserRiskConfig(BaseModel):
             allocated_funds=self.allocated_funds,
         )
 
+        if estimated_liq is None:
+            raise ValueError(
+                "Authoritative exchange inputs unavailable for liquidation estimation. "
+                "Configuration rejected without modifying user parameters."
+            )
+
         self.validate_estimated_liquidation(estimated_liq)
         return estimated_liq
 

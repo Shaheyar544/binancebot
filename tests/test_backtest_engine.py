@@ -173,14 +173,34 @@ def test_backtest_liquidation_trigger(backtest_config: BacktestConfig) -> None:
 
 
 def test_standard_liquidation_estimator_edge_cases() -> None:
-    """Estimator returns 0 for non-positive leverage."""
-    from src.backtest.engine import StandardLiquidationEstimator
+    """UnavailableLiquidationEstimator safely reports UNAVAILABLE without guessing formulas."""
+    from src.risk.liquidation import (
+        ConfigurableLiquidationEstimator,
+        LiquidationSafetyStatus,
+        UnavailableLiquidationEstimator,
+    )
 
-    est = StandardLiquidationEstimator()
-    res0 = est.estimate_liquidation_price(Decimal("2700"), Decimal("0"), Decimal("1000"))
-    assert res0 == Decimal("0")
-    res_neg = est.estimate_liquidation_price(Decimal("2700"), Decimal("-1"), Decimal("1000"))
-    assert res_neg == Decimal("0")
+    unavail = UnavailableLiquidationEstimator()
+    eval_res = unavail.evaluate_liquidation(
+        entry_price=Decimal("2700"),
+        leverage=Decimal("2"),
+        allocated_funds=Decimal("1000"),
+        max_acceptable_price=Decimal("2500"),
+    )
+    assert eval_res.status == LiquidationSafetyStatus.UNAVAILABLE
+    assert (
+        unavail.estimate_liquidation_price(Decimal("2700"), Decimal("2"), Decimal("1000")) is None
+    )
+
+    # Configurable estimator checks safety threshold explicitly
+    cfg_est = ConfigurableLiquidationEstimator(fixed_price=Decimal("2400"))
+    eval_safe = cfg_est.evaluate_liquidation(
+        entry_price=Decimal("2700"),
+        leverage=Decimal("2"),
+        allocated_funds=Decimal("1000"),
+        max_acceptable_price=Decimal("2500"),
+    )
+    assert eval_safe.status == LiquidationSafetyStatus.SAFE
 
 
 def test_resample_candles_edge_cases() -> None:

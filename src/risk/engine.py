@@ -102,21 +102,48 @@ class RiskEngine:
             )
 
         # 5. Liquidation price safety
-        estimated_liq = self.estimator.estimate_liquidation_price(
-            entry_price=current_price,
-            leverage=self.config.leverage,
-            allocated_funds=self.config.allocated_funds,
-        )
-        if estimated_liq > self.config.max_acceptable_liquidation_price:
-            return RiskCheckResult(
-                is_approved=False,
-                rejection_reason=RiskRejectionReason.UNSAFE_LIQUIDATION_PRICE,
-                explanation=(
-                    f"Estimated liquidation price (${estimated_liq:.2f}) "
-                    f"exceeds acceptable threshold "
-                    f"(${self.config.max_acceptable_liquidation_price:.2f})"
-                ),
+        if hasattr(self.estimator, "evaluate_liquidation"):
+            liq_eval = self.estimator.evaluate_liquidation(
+                entry_price=current_price,
+                leverage=self.config.leverage,
+                allocated_funds=self.config.allocated_funds,
+                max_acceptable_price=self.config.max_acceptable_liquidation_price,
             )
+            if not liq_eval.is_safe:
+                from src.risk.liquidation import LiquidationSafetyStatus
+
+                reason = (
+                    RiskRejectionReason.LIQUIDATION_INFO_UNAVAILABLE
+                    if liq_eval.status == LiquidationSafetyStatus.UNAVAILABLE
+                    else RiskRejectionReason.UNSAFE_LIQUIDATION_PRICE
+                )
+                return RiskCheckResult(
+                    is_approved=False,
+                    rejection_reason=reason,
+                    explanation=liq_eval.reason,
+                )
+        else:
+            estimated_liq = self.estimator.estimate_liquidation_price(
+                entry_price=current_price,
+                leverage=self.config.leverage,
+                allocated_funds=self.config.allocated_funds,
+            )
+            if estimated_liq is None:
+                return RiskCheckResult(
+                    is_approved=False,
+                    rejection_reason=RiskRejectionReason.LIQUIDATION_INFO_UNAVAILABLE,
+                    explanation="Liquidation estimator returned None (authoritative data absent)",
+                )
+            if estimated_liq > self.config.max_acceptable_liquidation_price:
+                return RiskCheckResult(
+                    is_approved=False,
+                    rejection_reason=RiskRejectionReason.UNSAFE_LIQUIDATION_PRICE,
+                    explanation=(
+                        f"Estimated liquidation price (${estimated_liq:.2f}) "
+                        f"exceeds acceptable threshold "
+                        f"(${self.config.max_acceptable_liquidation_price:.2f})"
+                    ),
+                )
 
         # 6. Sizing and exchange filter validation
         try:

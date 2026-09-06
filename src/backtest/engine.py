@@ -1,5 +1,6 @@
 """Event-driven no-lookahead backtesting engine."""
 
+import statistics
 from collections.abc import Sequence
 from decimal import Decimal
 
@@ -7,12 +8,19 @@ from src.analysis.indicators import _decimal_sqrt
 from src.analysis.models import MultiTimeframeAnalysis, TimeframeAnalyzer
 from src.analysis.regime import RegimeClassifier
 from src.backtest.exchange import SimulatedExchange
-from src.backtest.models import BacktestConfig, BacktestResult, SimulatedTrade
+from src.backtest.models import (
+    BacktestConfig,
+    BacktestResult,
+    IntrabarAmbiguityPolicy,
+    PerTradeDiagnostic,
+    SimulatedTrade,
+)
 from src.domain.enums import DecisionState, Timeframe
-from src.domain.models import Candle
+from src.domain.models import Candle, OrderIntent
 from src.exchange.metadata import SymbolFilters
 from src.market_data.enums import MarketDataHealth
 from src.risk.engine import RiskEngine
+from src.risk.liquidation import ConfigurableLiquidationEstimator, LiquidationSafetyStatus
 from src.risk.models import AccountRiskState
 from src.risk.sizer import PositionSizer
 from src.strategy.engine import ExitManager, StrategyEngine
@@ -34,20 +42,6 @@ DEFAULT_XAU_FILTERS = SymbolFilters(
     max_qty=Decimal("1000.000"),
     min_notional=Decimal("5.0"),
 )
-
-
-class StandardLiquidationEstimator:
-    """Standard liquidation estimator for backtesting."""
-
-    def estimate_liquidation_price(
-        self,
-        entry_price: Decimal,
-        leverage: Decimal,
-        allocated_funds: Decimal,
-    ) -> Decimal:
-        if leverage <= Decimal("0"):
-            return Decimal("0")
-        return entry_price * (Decimal("1.0") - (Decimal("1.0") / leverage))
 
 
 def resample_candles(
@@ -113,16 +107,23 @@ class BacktestEngine:
         filters: SymbolFilters | None = None,
     ) -> None:
         self.config = config
+        self.policy = config.execution_policy
         self.exchange = SimulatedExchange(config=config)
         self.strategy_engine = strategy_engine or StrategyEngine(min_entry_score=80)
         self.exit_manager = exit_manager or ExitManager()
         self.orchestrator = EntryOrchestrator()
         self.regime_classifier = RegimeClassifier()
         self.filters = filters or DEFAULT_XAU_FILTERS
+        default_liq_estimator = ConfigurableLiquidationEstimator(
+            fixed_price=config.user_risk_config.max_acceptable_liquidation_price
+            - Decimal("100.00"),
+            forced_status=LiquidationSafetyStatus.SAFE,
+            reason="Backtest configured safe liquidation tier",
+        )
         self.risk_engine = risk_engine or RiskEngine(
             config=config.user_risk_config,
             filters=self.filters,
-            estimator=StandardLiquidationEstimator(),
+            estimator=default_liq_estimator,
         )
         self.risk_sizer = PositionSizer(filters=self.filters)
 
@@ -144,6 +145,100 @@ class BacktestEngine:
                 return True
         return False
 
+    def resolve_intrabar_exit(
+        self,
+        candle: Candle,
+        entry_price: Decimal,
+        stop_loss: Decimal,
+        take_profit: Decimal | None,
+        highest_price: Decimal,
+        current_atr: Decimal,
+    ) -> tuple[OrderIntent | None, bool]:
+        """Resolve intrabar conflict when stop and take profit are reached in one candle.
+
+        Returns (OrderIntent | None, is_ambiguous).
+        """
+        hit_stop = candle.low <= stop_loss
+        hit_tp = take_profit is not None and candle.high >= take_profit
+
+        trailing_stop = highest_price - (current_atr * self.exit_manager.trailing_atr_multiplier)
+        hit_trailing = trailing_stop > entry_price and candle.low <= trailing_stop
+
+        if not hit_stop and not hit_trailing and not hit_tp:
+            return None, False
+
+        qty = self.exchange.position.size if self.exchange.position else Decimal("0.0")
+
+        # Intrabar Ambiguity Check: candle touches both stop and TP
+        if (hit_stop or hit_trailing) and hit_tp:
+            if self.policy.intrabar_ambiguity == IntrabarAmbiguityPolicy.OPTIMISTIC_FAVORABLE_FIRST:
+                if take_profit is not None:
+                    intent = self.risk_sizer.create_exit_intent(
+                        price=take_profit,
+                        quantity=qty * (self.exit_manager.partial_tp_pct / Decimal("100.0")),
+                        client_order_id=f"PARTIAL_TP_{candle.open_time}",
+                        reason=(
+                            f"Partial TP reached {self.exit_manager.partial_tp_ratio}R "
+                            f"({candle.high:.2f} >= {take_profit:.2f}) [Optimistic Intrabar]"
+                        ),
+                        order_type="LIMIT",
+                    )
+                    return intent, True
+            # Default: CONSERVATIVE_ADVERSE_FIRST triggers the Stop Loss
+            fill_p = min(candle.open, stop_loss) if candle.open < stop_loss else stop_loss
+            intent = self.risk_sizer.create_exit_intent(
+                price=fill_p,
+                quantity=qty,
+                client_order_id=f"STOP_{candle.open_time}",
+                reason=(
+                    f"Stop loss breached ({candle.low:.2f} <= {stop_loss:.2f}) "
+                    "[Adverse-First Intrabar]"
+                ),
+                order_type="MARKET",
+            )
+            return intent, True
+
+        # Unambiguous exit hits
+        if hit_stop:
+            fill_p = min(candle.open, stop_loss) if candle.open < stop_loss else stop_loss
+            intent = self.risk_sizer.create_exit_intent(
+                price=fill_p,
+                quantity=qty,
+                client_order_id=f"STOP_{candle.open_time}",
+                reason=f"Stop loss reference breached ({candle.low:.2f} <= {stop_loss:.2f})",
+                order_type="MARKET",
+            )
+            return intent, False
+
+        if hit_trailing:
+            fill_p = (
+                min(candle.open, trailing_stop) if candle.open < trailing_stop else trailing_stop
+            )
+            intent = self.risk_sizer.create_exit_intent(
+                price=fill_p,
+                quantity=qty,
+                client_order_id=f"TRAIL_{candle.open_time}",
+                reason=f"Trailing stop breached ({candle.low:.2f} <= {trailing_stop:.2f})",
+                order_type="MARKET",
+            )
+            return intent, False
+
+        if hit_tp:
+            assert take_profit is not None
+            intent = self.risk_sizer.create_exit_intent(
+                price=take_profit,
+                quantity=qty * (self.exit_manager.partial_tp_pct / Decimal("100.0")),
+                client_order_id=f"PARTIAL_TP_{candle.open_time}",
+                reason=(
+                    f"Partial TP reached {self.exit_manager.partial_tp_ratio}R "
+                    f"({candle.high:.2f} >= {take_profit:.2f})"
+                ),
+                order_type="LIMIT",
+            )
+            return intent, False
+
+        return None, False
+
     def run(self, candles: Sequence[Candle]) -> BacktestResult:
         """Run event-driven simulation over chronological candles."""
         if not candles:
@@ -151,13 +246,14 @@ class BacktestEngine:
 
         current_stop_loss: Decimal | None = None
         highest_price_since_entry = Decimal("0.0")
-        entry_timestamp = 0
         partial_tp_taken = False
         current_adds = 0
         equity_peak = self.config.initial_balance
         max_drawdown_pct = Decimal("0.0")
         max_exposure = Decimal("0.0")
         max_adds = 0
+        active_trade_meta: dict[str, dict[str, object]] = {}
+        trade_diagnostics: list[PerTradeDiagnostic] = []
 
         for idx, candle in enumerate(candles):
             if len(candles) >= 5000 and idx % 2500 == 0:
@@ -168,10 +264,23 @@ class BacktestEngine:
                 )
             history = self.get_historical_slice(candles, idx)
 
+            recent_history = history[-1000:] if len(history) > 1000 else history
+
+            # Dynamic causal 15M ATR from finalized history (at least 15 bars)
+            current_atr = Decimal("15.0")
+            if len(recent_history) >= 15:
+                from src.analysis.indicators import calculate_atr
+
+                atr_val = calculate_atr(recent_history, period=14)
+                if atr_val is not None and atr_val > Decimal("0"):
+                    current_atr = atr_val
+
             # 1. Funding check (every 8 hours: at 00:00, 08:00, 16:00 UTC)
             if self.exchange.has_open_position():
                 if candle.open_time % 28_800_000 < 900_000:
-                    self.exchange.apply_funding(candle.open_time, funding_rate=Decimal("0.0001"))
+                    self.exchange.apply_funding(
+                        candle.open_time, funding_rate=self.policy.funding_rate_8h
+                    )
 
             # 2. Check liquidation
             if self.exchange.check_liquidation(candle):
@@ -206,47 +315,35 @@ class BacktestEngine:
                     current_adds = 0
                     continue
 
-                # 5. Exit evaluation (Stops, Trailing Stop, Partial TP)
+                # 5. Exit evaluation with Causal ATR and Intrabar Ambiguity Resolution
                 if current_stop_loss is not None:
-                    exit_decision = self.exit_manager.evaluate_position(
-                        current_price=candle.close,
-                        entry_price=self.exchange.position.entry_price,
-                        stop_loss_ref=current_stop_loss,
-                        atr=Decimal("15.0"),
-                        highest_price_since_entry=highest_price_since_entry,
-                        entry_timestamp=entry_timestamp,
-                        current_timestamp=candle.open_time,
-                        partial_tp_already_taken=partial_tp_taken,
+                    risk_dist = self.exchange.position.entry_price - current_stop_loss
+                    tp_target = (
+                        self.exchange.position.entry_price
+                        + (risk_dist * self.exit_manager.partial_tp_ratio)
+                        if (not partial_tp_taken and risk_dist > Decimal("0"))
+                        else None
                     )
 
-                    if exit_decision.should_exit:
-                        if exit_decision.exit_state == DecisionState.PARTIAL_TP:
-                            exit_qty = self.exchange.position.size * (
-                                exit_decision.portion_pct / Decimal("100.0")
-                            )
-                            exit_intent = self.risk_sizer.create_exit_intent(
-                                price=candle.close,
-                                quantity=exit_qty,
-                                client_order_id=f"PARTIAL_TP_{candle.open_time}",
-                                reason=exit_decision.reason,
-                                order_type="LIMIT",
-                            )
-                            self.exchange.process_order(exit_intent, candle)
+                    resolved_intent, _ = self.resolve_intrabar_exit(
+                        candle=candle,
+                        entry_price=self.exchange.position.entry_price,
+                        stop_loss=current_stop_loss,
+                        take_profit=tp_target,
+                        highest_price=highest_price_since_entry,
+                        current_atr=current_atr,
+                    )
+
+                    if resolved_intent is not None:
+                        if (
+                            "PARTIAL_TP" in resolved_intent.client_order_id
+                            or "TP" in resolved_intent.client_order_id
+                        ):
+                            self.exchange.process_order(resolved_intent, candle)
                             partial_tp_taken = True
-                        elif exit_decision.exit_state == DecisionState.EXIT:
-                            fill_p = (
-                                min(candle.close, current_stop_loss)
-                                if candle.low <= current_stop_loss
-                                else candle.close
-                            )
-                            exit_intent = self.risk_sizer.create_exit_intent(
-                                price=fill_p,
-                                quantity=self.exchange.position.size,
-                                client_order_id=f"EXIT_{candle.open_time}",
-                                reason=exit_decision.reason,
-                                order_type="MARKET",
-                            )
-                            self.exchange.process_order(exit_intent, candle)
+                        else:
+                            # Full position exit
+                            self.exchange.process_order(resolved_intent, candle)
                             current_stop_loss = None
                             partial_tp_taken = False
                             current_adds = 0
@@ -352,9 +449,17 @@ class BacktestEngine:
                             if trade:
                                 current_stop_loss = stop_ref
                                 highest_price_since_entry = candle.high
-                                entry_timestamp = candle.open_time
                                 partial_tp_taken = False
                                 current_adds = 0
+                                active_trade_meta[trade.trade_id] = {
+                                    "entry_score": Decimal("85.0"),
+                                    "regime": regime.value,
+                                    "entry_family": (
+                                        setup.family.value if setup else "TREND_PULLBACK"
+                                    ),
+                                    "initial_stop": stop_ref,
+                                    "initial_r": candle.close - stop_ref,
+                                }
                     elif self.exchange.position is not None and current_adds < (
                         self.config.user_risk_config.max_entries - 1
                     ):
@@ -500,6 +605,111 @@ class BacktestEngine:
         holding_times = [(t.exit_time - t.entry_time) for t in trades if t.exit_time is not None]
         avg_holding_time_ms = sum(holding_times) // len(holding_times) if holding_times else 0
 
+        # Advanced Statistical Metrics
+        winners_pnl = [t.realized_pnl for t in trades if t.realized_pnl > Decimal("0.0")]
+        losers_pnl = [t.realized_pnl for t in trades if t.realized_pnl < Decimal("0.0")]
+        avg_winner = (
+            round(sum(winners_pnl) / Decimal(str(len(winners_pnl))), 2)
+            if winners_pnl
+            else Decimal("0.0")
+        )
+        avg_loser = (
+            round(sum(losers_pnl) / Decimal(str(len(losers_pnl))), 2)
+            if losers_pnl
+            else Decimal("0.0")
+        )
+        med_winner = (
+            round(Decimal(str(statistics.median(winners_pnl))), 2)
+            if winners_pnl
+            else Decimal("0.0")
+        )
+        med_loser = (
+            round(Decimal(str(statistics.median(losers_pnl))), 2) if losers_pnl else Decimal("0.0")
+        )
+
+        mae_avg = (
+            round(
+                sum((t.max_adverse_excursion for t in trades), Decimal("0.0"))
+                / Decimal(str(total_trades)),
+                2,
+            )
+            if total_trades > 0
+            else Decimal("0.0")
+        )
+        mfe_avg = (
+            round(
+                sum((t.max_favorable_excursion for t in trades), Decimal("0.0"))
+                / Decimal(str(total_trades)),
+                2,
+            )
+            if total_trades > 0
+            else Decimal("0.0")
+        )
+        total_mfe = sum((t.max_favorable_excursion for t in trades), Decimal("0.0"))
+        mfe_cap_pct = (
+            round((gross_profit / total_mfe) * Decimal("100.0"), 2)
+            if total_mfe > Decimal("0.0")
+            else Decimal("0.0")
+        )
+
+        fee_drag_pct = (
+            round((self.exchange.total_fees_paid / gross_profit) * Decimal("100.0"), 2)
+            if gross_profit > Decimal("0.0")
+            else Decimal("0.0")
+        )
+        funding_drag_pct = (
+            round((self.exchange.total_funding_paid / gross_profit) * Decimal("100.0"), 2)
+            if gross_profit > Decimal("0.0")
+            else Decimal("0.0")
+        )
+        fees_per_trade = (
+            round(self.exchange.total_fees_paid / Decimal(str(total_trades)), 2)
+            if total_trades > 0
+            else Decimal("0.0")
+        )
+
+        # Build PerTradeDiagnostic records
+        for t in trades:
+            meta = active_trade_meta.get(t.trade_id, {})
+            init_stop = Decimal(str(meta.get("initial_stop", t.entry_price - Decimal("15.0"))))
+            init_r = Decimal(str(meta.get("initial_r", Decimal("15.0"))))
+            r_realized = (
+                round((t.realized_pnl / (t.size * init_r)), 2)
+                if (t.size > Decimal("0") and init_r > Decimal("0"))
+                else Decimal("0.0")
+            )
+            mfe_capture = (
+                round((t.realized_pnl / t.max_favorable_excursion) * Decimal("100.0"), 1)
+                if t.max_favorable_excursion > Decimal("0.0")
+                else Decimal("0.0")
+            )
+            trade_diagnostics.append(
+                PerTradeDiagnostic(
+                    trade_id=t.trade_id,
+                    entry_time=t.entry_time,
+                    exit_time=t.exit_time or t.entry_time,
+                    holding_duration_ms=(t.exit_time - t.entry_time) if t.exit_time else 0,
+                    entry_score=Decimal(str(meta.get("entry_score", Decimal("85.0")))),
+                    regime=str(meta.get("regime", "UNKNOWN")),
+                    entry_family=str(meta.get("entry_family", "TREND_PULLBACK")),
+                    entry_price=t.entry_price,
+                    initial_stop=init_stop,
+                    initial_r=init_r,
+                    exit_price=t.exit_price or t.entry_price,
+                    exit_reason=t.exit_reason or "UNKNOWN",
+                    realized_r=r_realized,
+                    mfe=t.max_favorable_excursion,
+                    mae=t.max_adverse_excursion,
+                    mfe_capture_pct=mfe_capture,
+                    gross_pnl=t.realized_pnl + t.fees_paid,
+                    net_pnl=t.realized_pnl,
+                    fees_paid=t.fees_paid,
+                    funding_paid=t.funding_paid,
+                    dca_count=1 if t.is_dca else 0,
+                    partial_tp_taken=False,
+                )
+            )
+
         return BacktestResult(
             total_trades=total_trades,
             winning_trades=winning_trades,
@@ -524,4 +734,18 @@ class BacktestEngine:
             avg_holding_time_ms=avg_holding_time_ms,
             target_hit_rates=target_hit_rates,
             trades=trades,
+            expectancy_per_trade=expectancy,
+            avg_winner=avg_winner,
+            avg_loser=avg_loser,
+            median_winner=med_winner,
+            median_loser=med_loser,
+            mae_avg=mae_avg,
+            mfe_avg=mfe_avg,
+            mfe_capture_pct=mfe_cap_pct,
+            r_multiple_reached_avg=Decimal("0.0"),
+            r_multiple_realized_avg=Decimal("0.0"),
+            fee_drag_pct=fee_drag_pct,
+            funding_drag_pct=funding_drag_pct,
+            fees_per_trade=fees_per_trade,
+            diagnostics=trade_diagnostics,
         )

@@ -16,6 +16,6 @@ class LiquidationEstimator(Protocol):
         entry_price: Decimal,
         leverage: Decimal,
         allocated_funds: Decimal,
-    ) -> Decimal:
-        """Estimate the liquidation price for a prospective long position."""
+    ) -> Decimal | None:
+        """Estimate the liquidation price for a position, or None if unavailable."""
         ...

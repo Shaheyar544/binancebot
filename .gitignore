@@ -57,3 +57,6 @@ xau_bot.db
 
 # Graphify output
 graphify-out/
+
+# Downloaded market data cache
+data/
