@@ -282,12 +282,17 @@ class BacktestEngine:
                         candle.open_time, funding_rate=self.policy.funding_rate_8h
                     )
 
-            # 2. Check liquidation
+            # 2. Check liquidation or depleted capital
             if self.exchange.check_liquidation(candle):
                 current_stop_loss = None
                 partial_tp_taken = False
                 current_adds = 0
                 continue
+
+            # If wallet balance is completely depleted (<= 0), no further entries are possible
+            if self.exchange.wallet_balance <= Decimal("0.0"):
+                if not self.exchange.has_open_position():
+                    continue
 
             # 3. Excursions and exposure tracking
             if self.exchange.has_open_position() and self.exchange.position is not None:
@@ -412,6 +417,9 @@ class BacktestEngine:
 
                 if decision.decision_state == DecisionState.BUY:
                     if not self.exchange.has_open_position():
+                        if self.exchange.wallet_balance <= Decimal("0.0"):
+                            continue
+
                         stop_ref = (
                             setup.stop_loss_ref
                             if setup
@@ -460,16 +468,19 @@ class BacktestEngine:
                                     "initial_stop": stop_ref,
                                     "initial_r": candle.close - stop_ref,
                                 }
-                    elif self.exchange.position is not None and current_adds < (
-                        self.config.user_risk_config.max_entries - 1
+                    elif (
+                        self.exchange.position is not None
+                        and current_adds < (self.config.user_risk_config.max_entries - 1)
+                        and self.exchange.wallet_balance > Decimal("0.0")
                     ):
                         dca_notional = min(
                             Decimal("500.00"),
                             self.config.user_risk_config.allocated_funds * Decimal("0.2"),
                         )
+                        avail_bal = max(Decimal("0.0"), self.exchange.wallet_balance)
                         acc_state = AccountRiskState(
-                            wallet_balance=self.exchange.wallet_balance,
-                            available_balance=self.exchange.wallet_balance,
+                            wallet_balance=avail_bal,
+                            available_balance=avail_bal,
                             total_open_exposure=self.exchange.position.size * candle.close,
                             realized_daily_loss=Decimal("0.0"),
                             unrealized_pnl=Decimal("0.0"),
