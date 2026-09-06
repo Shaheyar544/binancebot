@@ -312,3 +312,227 @@ def test_per_trade_diagnostic_telemetry(base_risk_config: UserRiskConfig) -> Non
     assert diag.fees_paid == Decimal("5.00")
     assert diag.mfe == Decimal("60.00")
     assert diag.mae == Decimal("10.00")
+
+
+def test_default_backtest_engine_fails_closed_when_liquidation_unavailable(
+    base_risk_config: UserRiskConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without an explicit margin estimator, BacktestEngine defaults to Unavailable.
+
+    Ensures no false claims of 100% liquidation safety without exchange margin tiers.
+    """
+    from unittest.mock import MagicMock
+
+    from src.domain.enums import DecisionState, MarketRegime
+    from src.domain.models import DecisionSnapshot
+    from src.strategy.entry_families import EntryFamily, EntrySetup
+
+    cfg = BacktestConfig(user_risk_config=base_risk_config)
+    mock_strat = MagicMock()
+    mock_strat.evaluate.return_value = DecisionSnapshot(
+        decision_id="mock_buy",
+        symbol="XAUUSDT",
+        timestamp=1700000000000,
+        decision_state=DecisionState.BUY,
+        regime=MarketRegime.STRONG_BULL,
+        reason="Mock confluence buy",
+    )
+    engine = BacktestEngine(config=cfg, strategy_engine=mock_strat)
+    monkeypatch.setattr(
+        engine.orchestrator,
+        "evaluate_setups",
+        MagicMock(
+            return_value=EntrySetup(
+                family=EntryFamily.TREND_PULLBACK,
+                level=Decimal("2700.0"),
+                stop_loss_ref=Decimal("2680.0"),
+            )
+        ),
+    )
+
+    candles = [
+        Candle(
+            symbol="XAUUSDT",
+            timeframe=Timeframe.M15,
+            open_time=1700000000000 + i * 900000,
+            open=Decimal("2700.0"),
+            high=Decimal("2710.0"),
+            low=Decimal("2690.0"),
+            close=Decimal("2705.0"),
+            volume=Decimal("100.0"),
+            close_time=1700000000000 + (i + 1) * 900000 - 1,
+            is_closed=True,
+        )
+        for i in range(25)
+    ]
+    result = engine.run(candles)
+    # Zero trades entered because liquidation safety is strictly UNAVAILABLE
+    assert result.total_trades == 0
+    assert result.net_profit == Decimal("0.0")
+
+
+def test_execution_policy_single_source_of_truth(base_risk_config: UserRiskConfig) -> None:
+    """BacktestConfig routes fees and slippage directly into BacktestExecutionPolicy."""
+    cfg1 = BacktestConfig(
+        user_risk_config=base_risk_config,
+        maker_fee=Decimal("0.0003"),
+        taker_fee=Decimal("0.0007"),
+        slippage_pct=Decimal("0.0002"),
+    )
+    assert cfg1.execution_policy.maker_fee == Decimal("0.0003")
+    assert cfg1.execution_policy.taker_fee == Decimal("0.0007")
+    assert cfg1.execution_policy.slippage_pct == Decimal("0.0002")
+    assert cfg1.maker_fee == Decimal("0.0003")
+    assert cfg1.taker_fee == Decimal("0.0007")
+    assert cfg1.slippage_pct == Decimal("0.0002")
+
+
+def test_execution_policy_fees_and_slippage_directly_affect_exchange(
+    base_risk_config: UserRiskConfig,
+) -> None:
+    """Higher configured fees in execution_policy directly increase total_fees_paid."""
+    low_fee_policy = BacktestExecutionPolicy(
+        maker_fee=Decimal("0.0001"),
+        taker_fee=Decimal("0.0002"),
+        slippage_pct=Decimal("0.0"),
+    )
+    high_fee_policy = BacktestExecutionPolicy(
+        maker_fee=Decimal("0.0010"),
+        taker_fee=Decimal("0.0020"),
+        slippage_pct=Decimal("0.0005"),
+    )
+
+    cfg_low = BacktestConfig(user_risk_config=base_risk_config, execution_policy=low_fee_policy)
+    cfg_high = BacktestConfig(user_risk_config=base_risk_config, execution_policy=high_fee_policy)
+
+    exchange_low = SimulatedExchange(config=cfg_low)
+    exchange_high = SimulatedExchange(config=cfg_high)
+
+    candle = Candle(
+        symbol="XAUUSDT",
+        timeframe=Timeframe.M15,
+        open_time=1000,
+        open=Decimal("4000.00"),
+        high=Decimal("4010.00"),
+        low=Decimal("3990.00"),
+        close=Decimal("4000.00"),
+        volume=Decimal("10.0"),
+        close_time=1999,
+        is_closed=True,
+    )
+    market_buy = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="MARKET",
+        price=Decimal("4000.00"),
+        quantity=Decimal("1.000"),
+        notional=Decimal("4000.00"),
+        client_order_id="BUY_FEE_TEST",
+        reason="Test",
+    )
+
+    exchange_low.process_order(market_buy, candle)
+    exchange_high.process_order(market_buy, candle)
+
+    assert exchange_high.total_fees_paid > exchange_low.total_fees_paid
+    # High slippage means higher fill price for buy order
+    assert exchange_high.position is not None and exchange_low.position is not None
+    assert exchange_high.position.entry_price > exchange_low.position.entry_price
+
+
+def test_performance_breakdowns_populated_correctly(
+    base_risk_config: UserRiskConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backtest engine correctly partitions trades by setup family, regime, and score bucket."""
+    from unittest.mock import MagicMock
+
+    from src.domain.enums import DecisionState, MarketRegime
+    from src.domain.models import DecisionSnapshot
+    from src.risk.liquidation import ConfigurableLiquidationEstimator, LiquidationSafetyStatus
+    from src.strategy.entry_families import EntryFamily, EntrySetup
+
+    estimator = ConfigurableLiquidationEstimator(
+        fixed_price=Decimal("2400.00"),
+        forced_status=LiquidationSafetyStatus.SAFE,
+    )
+    cfg = BacktestConfig(user_risk_config=base_risk_config)
+    mock_strat = MagicMock()
+    mock_strat.evaluate.return_value = DecisionSnapshot(
+        decision_id="mock_buy",
+        symbol="XAUUSDT",
+        timestamp=1700000000000,
+        decision_state=DecisionState.BUY,
+        regime=MarketRegime.STRONG_BULL,
+        reason="Mock confluence buy",
+    )
+    engine = BacktestEngine(config=cfg, strategy_engine=mock_strat, estimator=estimator)
+    monkeypatch.setattr(
+        engine.orchestrator,
+        "evaluate_setups",
+        MagicMock(
+            return_value=EntrySetup(
+                family=EntryFamily.TREND_PULLBACK,
+                level=Decimal("2700.0"),
+                stop_loss_ref=Decimal("2680.0"),
+            )
+        ),
+    )
+
+    candles = [
+        Candle(
+            symbol="XAUUSDT",
+            timeframe=Timeframe.M15,
+            open_time=1700000000000 + i * 900000,
+            open=Decimal("2700.0"),
+            high=Decimal("2710.0"),
+            low=Decimal("2690.0"),
+            close=Decimal("2705.0"),
+            volume=Decimal("100.0"),
+            close_time=1700000000000 + (i + 1) * 900000 - 1,
+            is_closed=True,
+        )
+        for i in range(25)
+    ]
+    result = engine.run(candles)
+    assert result.total_trades > 0
+
+    # Breakdowns must be populated
+    assert "TREND_PULLBACK" in result.setup_family_performance
+    assert len(result.regime_performance) >= 1
+    assert any(k in result.regime_performance for k in ["NEUTRAL", "BULL", "STRONG_BULL"])
+    assert "85-89" in result.score_bucket_performance
+
+    fam_perf = result.setup_family_performance["TREND_PULLBACK"]
+    assert "total_trades" in fam_perf
+    assert "win_rate" in fam_perf
+    assert "net_pnl" in fam_perf
+    assert "profit_factor" in fam_perf
+    assert fam_perf["total_trades"] == Decimal(str(result.total_trades))
+
+
+def test_insufficient_bars_handles_atr_unavailability(base_risk_config: UserRiskConfig) -> None:
+    """When candle count is < 15, trailing stop does not activate on fabricated ATR."""
+    engine = BacktestEngine(config=BacktestConfig(user_risk_config=base_risk_config))
+    candle = Candle(
+        symbol="XAUUSDT",
+        timeframe=Timeframe.M15,
+        open_time=1000,
+        open=Decimal("4000.00"),
+        high=Decimal("4005.00"),
+        low=Decimal("3995.00"),
+        close=Decimal("4000.00"),
+        volume=Decimal("10.0"),
+        close_time=1999,
+        is_closed=True,
+    )
+    # resolve_intrabar_exit with current_atr=None should safely return None without crashing
+    exit_intent, is_ambiguous = engine.resolve_intrabar_exit(
+        candle=candle,
+        entry_price=Decimal("4000.00"),
+        stop_loss=Decimal("3980.00"),
+        take_profit=Decimal("4050.00"),
+        highest_price=Decimal("4010.00"),
+        current_atr=None,
+    )
+    assert exit_intent is None
+    assert is_ambiguous is False

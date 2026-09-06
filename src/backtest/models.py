@@ -1,9 +1,8 @@
-"""Backtesting domain models, configuration, and comprehensive performance summaries."""
-
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.config.settings import UserRiskConfig
 
@@ -62,6 +61,31 @@ class BacktestConfig(BaseModel):
     user_risk_config: UserRiskConfig
     news_event_timestamps: list[int] = Field(default_factory=list)
     execution_policy: BacktestExecutionPolicy = Field(default_factory=BacktestExecutionPolicy)
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_execution_policy(cls, data: Any) -> Any:
+        """Route top-level fee/slippage kwargs into execution_policy as single source of truth."""
+        if isinstance(data, dict):
+            pol = data.get("execution_policy")
+            pol_dict = (
+                pol.model_dump()
+                if isinstance(pol, BaseModel)
+                else (dict(pol) if isinstance(pol, dict) else {})
+            )
+            for key in ("maker_fee", "taker_fee", "slippage_pct"):
+                if key in data:
+                    val = data[key]
+                    if key not in pol_dict:
+                        pol_dict[key] = val
+                elif key in pol_dict:
+                    data[key] = pol_dict[key]
+            if pol_dict:
+                data["execution_policy"] = BacktestExecutionPolicy(**pol_dict)
+                for key in ("maker_fee", "taker_fee", "slippage_pct"):
+                    if key in pol_dict:
+                        data[key] = pol_dict[key]
+        return data
 
 
 class SimulatedTrade(BaseModel):

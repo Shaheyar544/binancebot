@@ -12,6 +12,7 @@ from src.backtest.models import (
     BacktestConfig,
     BacktestResult,
     IntrabarAmbiguityPolicy,
+    LiquidationModelPolicy,
     PerTradeDiagnostic,
     SimulatedTrade,
 )
@@ -20,7 +21,10 @@ from src.domain.models import Candle, OrderIntent
 from src.exchange.metadata import SymbolFilters
 from src.market_data.enums import MarketDataHealth
 from src.risk.engine import RiskEngine
-from src.risk.liquidation import ConfigurableLiquidationEstimator, LiquidationSafetyStatus
+from src.risk.liquidation import (
+    ExchangeLiquidationEstimator,
+    UnavailableLiquidationEstimator,
+)
 from src.risk.models import AccountRiskState
 from src.risk.sizer import PositionSizer
 from src.strategy.engine import ExitManager, StrategyEngine
@@ -105,6 +109,7 @@ class BacktestEngine:
         risk_engine: RiskEngine | None = None,
         exit_manager: ExitManager | None = None,
         filters: SymbolFilters | None = None,
+        estimator: ExchangeLiquidationEstimator | None = None,
     ) -> None:
         self.config = config
         self.policy = config.execution_policy
@@ -114,16 +119,24 @@ class BacktestEngine:
         self.orchestrator = EntryOrchestrator()
         self.regime_classifier = RegimeClassifier()
         self.filters = filters or DEFAULT_XAU_FILTERS
-        default_liq_estimator = ConfigurableLiquidationEstimator(
-            fixed_price=config.user_risk_config.max_acceptable_liquidation_price
-            - Decimal("100.00"),
-            forced_status=LiquidationSafetyStatus.SAFE,
-            reason="Backtest configured safe liquidation tier",
-        )
+
+        if estimator is not None:
+            liq_estimator = estimator
+        elif self.policy.liquidation_policy == LiquidationModelPolicy.UNAVAILABLE:
+            liq_estimator = UnavailableLiquidationEstimator(
+                reason="Authoritative Binance margin tiers unavailable in backtest"
+            )
+        else:
+            # EXPLICIT_MODEL requested but no explicit estimator provided:
+            # strictly fail closed with UnavailableLiquidationEstimator rather than guessing.
+            liq_estimator = UnavailableLiquidationEstimator(
+                reason="Authoritative Binance margin model not provided for backtest"
+            )
+
         self.risk_engine = risk_engine or RiskEngine(
             config=config.user_risk_config,
             filters=self.filters,
-            estimator=default_liq_estimator,
+            estimator=liq_estimator,
         )
         self.risk_sizer = PositionSizer(filters=self.filters)
 
@@ -152,7 +165,7 @@ class BacktestEngine:
         stop_loss: Decimal,
         take_profit: Decimal | None,
         highest_price: Decimal,
-        current_atr: Decimal,
+        current_atr: Decimal | None,
     ) -> tuple[OrderIntent | None, bool]:
         """Resolve intrabar conflict when stop and take profit are reached in one candle.
 
@@ -161,8 +174,13 @@ class BacktestEngine:
         hit_stop = candle.low <= stop_loss
         hit_tp = take_profit is not None and candle.high >= take_profit
 
-        trailing_stop = highest_price - (current_atr * self.exit_manager.trailing_atr_multiplier)
-        hit_trailing = trailing_stop > entry_price and candle.low <= trailing_stop
+        hit_trailing = False
+        trailing_stop = Decimal("0.0")
+        if current_atr is not None and current_atr > Decimal("0"):
+            trailing_stop = highest_price - (
+                current_atr * self.exit_manager.trailing_atr_multiplier
+            )
+            hit_trailing = trailing_stop > entry_price and candle.low <= trailing_stop
 
         if not hit_stop and not hit_trailing and not hit_tp:
             return None, False
@@ -266,8 +284,8 @@ class BacktestEngine:
 
             recent_history = history[-1000:] if len(history) > 1000 else history
 
-            # Dynamic causal 15M ATR from finalized history (at least 15 bars)
-            current_atr = Decimal("15.0")
+            # Dynamic causal 15M ATR from finalized history (strictly at least 15 bars)
+            current_atr: Decimal | None = None
             if len(recent_history) >= 15:
                 from src.analysis.indicators import calculate_atr
 
@@ -682,8 +700,20 @@ class BacktestEngine:
         # Build PerTradeDiagnostic records
         for t in trades:
             meta = active_trade_meta.get(t.trade_id, {})
-            init_stop = Decimal(str(meta.get("initial_stop", t.entry_price - Decimal("15.0"))))
-            init_r = Decimal(str(meta.get("initial_r", Decimal("15.0"))))
+            # Safely extract initial stop and initial R without hardcoding 15.0
+            fallback_stop = (
+                t.entry_price - Decimal("10.0")
+                if t.entry_price > Decimal("10.0")
+                else Decimal("0.0")
+            )
+            init_stop = (
+                Decimal(str(meta["initial_stop"])) if "initial_stop" in meta else fallback_stop
+            )
+            init_r = (
+                Decimal(str(meta["initial_r"]))
+                if "initial_r" in meta
+                else max(Decimal("1.0"), t.entry_price - init_stop)
+            )
             r_realized = (
                 round((t.realized_pnl / (t.size * init_r)), 2)
                 if (t.size > Decimal("0") and init_r > Decimal("0"))
@@ -720,6 +750,61 @@ class BacktestEngine:
                     partial_tp_taken=False,
                 )
             )
+
+        # Helper to compute breakdown metrics for diagnostic partitions
+        def _compute_partition_metrics(
+            partition_diags: list[PerTradeDiagnostic],
+        ) -> dict[str, Decimal]:
+            p_total = len(partition_diags)
+            if p_total == 0:
+                return {
+                    "total_trades": Decimal("0"),
+                    "win_rate": Decimal("0.0"),
+                    "net_pnl": Decimal("0.0"),
+                    "profit_factor": Decimal("0.0"),
+                }
+            p_wins = [d for d in partition_diags if d.net_pnl > Decimal("0.0")]
+            p_losses = [d for d in partition_diags if d.net_pnl < Decimal("0.0")]
+            p_win_rate = round(Decimal(str(len(p_wins))) / Decimal(str(p_total)), 4)
+            p_gross_win = sum((d.net_pnl for d in p_wins), Decimal("0.0"))
+            p_gross_loss = abs(sum((d.net_pnl for d in p_losses), Decimal("0.0")))
+            p_pf = (
+                round(p_gross_win / p_gross_loss, 2)
+                if p_gross_loss > Decimal("0.0")
+                else (Decimal("100.0") if p_gross_win > Decimal("0.0") else Decimal("0.0"))
+            )
+            return {
+                "total_trades": Decimal(str(p_total)),
+                "win_rate": p_win_rate,
+                "net_pnl": p_gross_win - p_gross_loss,
+                "profit_factor": p_pf,
+            }
+
+        # Populate Setup Family Performance Breakdown
+        setup_family_performance: dict[str, dict[str, Decimal]] = {}
+        families = {d.entry_family for d in trade_diagnostics}
+        for fam in sorted(families):
+            subset = [d for d in trade_diagnostics if d.entry_family == fam]
+            setup_family_performance[fam] = _compute_partition_metrics(subset)
+
+        # Populate Regime Performance Breakdown
+        regime_performance: dict[str, dict[str, Decimal]] = {}
+        regimes = {d.regime for d in trade_diagnostics}
+        for reg in sorted(regimes):
+            subset = [d for d in trade_diagnostics if d.regime == reg]
+            regime_performance[reg] = _compute_partition_metrics(subset)
+
+        # Populate Score Bucket Performance Breakdown
+        score_bucket_performance: dict[str, dict[str, Decimal]] = {}
+        buckets = [
+            ("80-84", Decimal("80.0"), Decimal("85.0")),
+            ("85-89", Decimal("85.0"), Decimal("90.0")),
+            ("90-100", Decimal("90.0"), Decimal("101.0")),
+        ]
+        for label, low, high in buckets:
+            subset = [d for d in trade_diagnostics if low <= d.entry_score < high]
+            if subset:
+                score_bucket_performance[label] = _compute_partition_metrics(subset)
 
         return BacktestResult(
             total_trades=total_trades,
@@ -758,5 +843,8 @@ class BacktestEngine:
             fee_drag_pct=fee_drag_pct,
             funding_drag_pct=funding_drag_pct,
             fees_per_trade=fees_per_trade,
+            setup_family_performance=setup_family_performance,
+            regime_performance=regime_performance,
+            score_bucket_performance=score_bucket_performance,
             diagnostics=trade_diagnostics,
         )

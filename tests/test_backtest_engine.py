@@ -314,7 +314,13 @@ def test_backtest_entry_pipeline_execution(
         regime=MarketRegime.STRONG_BULL,
         reason="Mock confluence buy",
     )
-    engine = BacktestEngine(config=backtest_config, strategy_engine=mock_strat)
+    from src.risk.liquidation import ConfigurableLiquidationEstimator, LiquidationSafetyStatus
+
+    estimator = ConfigurableLiquidationEstimator(
+        fixed_price=Decimal("2400.00"),
+        forced_status=LiquidationSafetyStatus.SAFE,
+    )
+    engine = BacktestEngine(config=backtest_config, strategy_engine=mock_strat, estimator=estimator)
     monkeypatch.setattr(
         engine.orchestrator,
         "evaluate_setups",
