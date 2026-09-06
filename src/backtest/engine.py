@@ -160,6 +160,12 @@ class BacktestEngine:
         max_adds = 0
 
         for idx, candle in enumerate(candles):
+            if len(candles) >= 5000 and idx % 2500 == 0:
+                print(
+                    f"  [Backtest] Processed {idx}/{len(candles)} candles "
+                    f"({idx * 100 // len(candles)}%)...",
+                    flush=True,
+                )
             history = self.get_historical_slice(candles, idx)
 
             # 1. Funding check (every 8 hours: at 00:00, 08:00, 16:00 UTC)
@@ -247,10 +253,11 @@ class BacktestEngine:
 
             # 6. Strategy Evaluation and Entry / DCA
             if not self.is_news_locked(candle.open_time) and len(history) >= 20:
-                analysis_15m = TimeframeAnalyzer.analyze_timeframe(history, Timeframe.M15)
-                candles_1h = resample_candles(history, Timeframe.H1)
-                candles_4h = resample_candles(history, Timeframe.H4)
-                candles_1d = resample_candles(history, Timeframe.D1)
+                recent_history = history[-1000:] if len(history) > 1000 else history
+                analysis_15m = TimeframeAnalyzer.analyze_timeframe(recent_history, Timeframe.M15)
+                candles_1h = resample_candles(recent_history, Timeframe.H1)
+                candles_4h = resample_candles(recent_history, Timeframe.H4)
+                candles_1d = resample_candles(recent_history, Timeframe.D1)
 
                 analysis_1h = (
                     TimeframeAnalyzer.analyze_timeframe(candles_1h, Timeframe.H1)
@@ -289,9 +296,9 @@ class BacktestEngine:
                     timestamp=candle.close_time,
                 )
 
-                sup, res = self.orchestrator.identify_levels(history)
+                sup, res = self.orchestrator.identify_levels(recent_history)
                 setup = self.orchestrator.evaluate_setups(
-                    history,
+                    recent_history,
                     analysis_15m.ema_20,
                     analysis_15m.ema_50,
                     support_level=sup,

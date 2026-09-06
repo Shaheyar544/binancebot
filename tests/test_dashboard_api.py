@@ -104,6 +104,17 @@ async def test_decisions_endpoint(
 
 
 @pytest.mark.asyncio
+async def test_dashboard_html_endpoint(base_service: DashboardStateService) -> None:
+    """Dashboard root endpoint returns HTML page."""
+    app = create_dashboard_app(service=base_service)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+        assert "XAUUSDT" in resp.text
+
+
+@pytest.mark.asyncio
 async def test_no_mutating_endpoints_exist(base_service: DashboardStateService) -> None:
     """Verify that dashboard API strictly exposes only GET endpoints."""
     app = create_dashboard_app(service=base_service)
