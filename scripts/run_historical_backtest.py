@@ -51,12 +51,12 @@ def main() -> None:
 
     user_risk = UserRiskConfig(
         allocated_funds=Decimal("1000.00"),
-        leverage=Decimal("5.0"),
+        leverage=Decimal("2.0"),
         max_acceptable_liquidation_price=Decimal("2500.00"),
         max_entries=3,
         max_daily_loss=Decimal("200.00"),
         emergency_loss_limit=Decimal("400.00"),
-        max_total_exposure=Decimal("5000.00"),
+        max_total_exposure=Decimal("2000.00"),
     )
 
     config = BacktestConfig(

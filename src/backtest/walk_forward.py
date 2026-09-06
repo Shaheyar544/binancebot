@@ -111,6 +111,13 @@ class WalkForwardEngine:
         profitable_oos_count = 0
 
         for fold_idx, (train_slice, test_slice) in enumerate(data_folds):
+            if fold_idx % 10 == 0 or fold_idx == len(data_folds) - 1:
+                print(
+                    f"  [WalkForward] Fold {fold_idx + 1}/{len(data_folds)} "
+                    f"({(fold_idx + 1) * 100 // len(data_folds)}%)...",
+                    flush=True,
+                )
+
             # 1. Run in-sample backtest
             engine_is = BacktestEngine(config=self.config)
             result_is = engine_is.run(train_slice)
