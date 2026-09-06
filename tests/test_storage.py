@@ -1,5 +1,6 @@
 """Tests for SQLite persistence foundation and immutable decision snapshots."""
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -39,8 +40,8 @@ async def test_save_and_retrieve_decision_snapshot(tmp_path: Path) -> None:
         timestamp=1700000000000,
         decision_state=DecisionState.WAIT,
         regime=MarketRegime.BULLISH_RANGE,
-        indicators={"rsi": 45.5, "adx": 22.0},
-        risk_state={"liquidation_ok": True, "exposure": 0.0},
+        indicators={"rsi": "45.5", "adx": "22.0"},
+        risk_state={"liquidation_ok": True, "exposure": "0.00"},
         event_state={"in_news_lock": False},
         reason="Score 78 below entry threshold 85",
         source="StrategyEngine",
@@ -54,4 +55,44 @@ async def test_save_and_retrieve_decision_snapshot(tmp_path: Path) -> None:
     assert retrieved.decision_state == DecisionState.WAIT
     assert retrieved.regime == MarketRegime.BULLISH_RANGE
     assert retrieved.reason == "Score 78 below entry threshold 85"
-    assert retrieved.indicators["rsi"] == 45.5
+    assert retrieved.indicators["rsi"] == "45.5"
+
+
+@pytest.mark.asyncio
+async def test_financial_precision_preserved_in_storage(tmp_path: Path) -> None:
+    """Financial fields stored in SQLite as TEXT must retain exact Decimal precision."""
+    db_file = tmp_path / "test_precision.db"
+    db = DatabaseManager(str(db_file))
+    await db.initialize()
+
+    # Exact decimal precision with many decimal places
+    precise_amount = Decimal("2700.12345678")
+
+    async with db.connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO orders (
+                order_id, client_order_id, symbol, side, order_type,
+                quantity, price, notional, is_dca, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            (
+                "ord_1",
+                "cl_1",
+                "XAUUSDT",
+                "BUY",
+                "LIMIT",
+                str(Decimal("0.50000000")),
+                str(precise_amount),
+                str(Decimal("1350.06172839")),
+                0,
+                "NEW",
+            ),
+        )
+        await conn.commit()
+
+        cursor = await conn.execute("SELECT price, notional FROM orders WHERE order_id = 'ord_1';")
+        row = await cursor.fetchone()
+        assert row is not None
+        assert Decimal(row[0]) == precise_amount
+        assert Decimal(row[1]) == Decimal("1350.06172839")

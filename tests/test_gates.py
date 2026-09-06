@@ -17,7 +17,7 @@ def test_live_execution_raises_when_disabled() -> None:
     """Attempting live execution with default/disabled gates must raise RuntimeError."""
     gates = ExecutionGateConfig()
     with pytest.raises(RuntimeError, match="Live order execution is strictly blocked"):
-        gates.assert_live_execution_allowed()
+        gates.assert_execution_allowed()
 
 
 @pytest.mark.parametrize(
@@ -38,7 +38,7 @@ def test_live_execution_requires_both_flags(
     )
     assert gates.can_execute_live is False
     with pytest.raises(RuntimeError, match="Live order execution is strictly blocked"):
-        gates.assert_live_execution_allowed()
+        gates.assert_execution_allowed()
 
 
 def test_live_execution_allowed_only_when_both_true() -> None:
@@ -46,4 +46,15 @@ def test_live_execution_allowed_only_when_both_true() -> None:
     gates = ExecutionGateConfig(live_trading=True, enable_order_execution=True)
     assert gates.can_execute_live is True
     # Should not raise
-    gates.assert_live_execution_allowed()
+    gates.assert_execution_allowed()
+
+
+def test_no_accidental_truthy_string_coercion_enables_live() -> None:
+    """String values like 'false', '0', '' must not accidentally enable live trading."""
+    gates = ExecutionGateConfig(
+        live_trading=False,
+        enable_order_execution=False,
+    )
+    assert gates.can_execute_live is False
+    with pytest.raises(RuntimeError):
+        gates.assert_execution_allowed()

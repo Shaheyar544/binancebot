@@ -60,9 +60,9 @@ class DatabaseManager:
                     symbol TEXT NOT NULL,
                     side TEXT NOT NULL,
                     order_type TEXT NOT NULL,
-                    quantity REAL NOT NULL,
-                    price REAL NOT NULL,
-                    notional REAL NOT NULL,
+                    quantity TEXT NOT NULL,
+                    price TEXT NOT NULL,
+                    notional TEXT NOT NULL,
                     is_dca INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -77,11 +77,11 @@ class DatabaseManager:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     symbol TEXT NOT NULL,
                     side TEXT NOT NULL,
-                    size REAL NOT NULL,
-                    entry_price REAL NOT NULL,
-                    leverage REAL NOT NULL,
-                    liquidation_price REAL NOT NULL,
-                    unrealized_pnl REAL NOT NULL,
+                    size TEXT NOT NULL,
+                    entry_price TEXT NOT NULL,
+                    leverage TEXT NOT NULL,
+                    liquidation_price TEXT NOT NULL,
+                    unrealized_pnl TEXT NOT NULL,
                     updated_at INTEGER NOT NULL
                 );
                 """

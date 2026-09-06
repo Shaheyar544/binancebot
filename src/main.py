@@ -33,10 +33,10 @@ class BotApplication:
         """Perform deterministic, safe bootstrap sequence."""
         # 1. Configure logging and scrub secrets
         secrets_to_redact = []
-        if self.config.binance_api_key:
-            secrets_to_redact.append(self.config.binance_api_key)
-        if self.config.binance_api_secret:
-            secrets_to_redact.append(self.config.binance_api_secret)
+        if self.config.binance_api_key.get_secret_value():
+            secrets_to_redact.append(self.config.binance_api_key.get_secret_value())
+        if self.config.binance_api_secret.get_secret_value():
+            secrets_to_redact.append(self.config.binance_api_secret.get_secret_value())
 
         configure_logging(
             log_level=self.config.log_level,

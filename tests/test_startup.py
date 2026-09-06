@@ -31,3 +31,32 @@ async def test_safe_startup_with_disabled_gates(tmp_path: Path) -> None:
     assert status.live_execution_enabled is False
     assert status.initial_state == DecisionState.WAIT
     assert Path(db_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_no_order_placement_or_exchange_connection_in_this_phase(
+    tmp_path: Path,
+) -> None:
+    """Startup must never connect to live exchange or attempt order submission."""
+    db_path = str(tmp_path / "startup_safety.db")
+    config = BotConfig(
+        gates=ExecutionGateConfig(live_trading=False, enable_order_execution=False),
+        risk=UserRiskConfig(
+            allocated_funds=Decimal("1000.00"),
+            leverage=Decimal("3.0"),
+            max_acceptable_liquidation_price=Decimal("1800.00"),
+        ),
+        database_path=db_path,
+    )
+
+    app = BotApplication(config)
+    status = await app.bootstrap()
+
+    # Zero orders in DB
+    async with app.db.connection() as conn:
+        cursor = await conn.execute("SELECT COUNT(*) FROM orders;")
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == 0
+
+    assert status.live_execution_enabled is False
