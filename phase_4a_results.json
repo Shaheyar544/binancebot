@@ -1,0 +1,106 @@
+{
+  "geometry_summary": {
+    "total_setups": 3906,
+    "min_initial_r": 0.19405817444269988,
+    "max_initial_r": 140.0,
+    "median_initial_r": 7.721684824336222,
+    "count_r_lt_1_00": 195,
+    "count_r_lt_0_50_atr": 0,
+    "count_r_lt_0_25_atr": 0,
+    "median_r_over_atr": 1.1129723412543826
+  },
+  "sizing_summary": {
+    "total_trades": 551,
+    "min_actual_risk": 0.18361,
+    "max_actual_risk": 9.999925,
+    "median_actual_risk": 3.600764,
+    "count_actual_risk_lt_1_dollar": 79,
+    "count_actual_risk_lt_5_dollars": 370,
+    "pct_actual_risk_lt_5_dollars": "67.15%",
+    "min_r_over_atr": 0.5020804438280166,
+    "median_r_over_atr": 1.2187698833510074
+  },
+  "perf_summary": {
+    "total_trades": 551,
+    "winning_trades": 147,
+    "losing_trades": 404,
+    "win_rate": 0.26678765880217786,
+    "gross_profit": 427.684827334,
+    "gross_loss": 1164.696644204,
+    "net_profit": -737.01181687,
+    "profit_factor": 0.3672070572730952,
+    "max_drawdown_pct": 0.1746,
+    "total_fees": 985.032863777534,
+    "total_maker_fees": 65.773745206,
+    "total_taker_fees": 919.259118571534,
+    "total_funding": 22.3526636286655,
+    "mfe_avg": 4.33,
+    "mfe_median": 2.3,
+    "mae_avg": 3.88,
+    "mfe_r_avg": 1.02,
+    "max_r_reached": 7.19,
+    "r_realized_avg": -0.48,
+    "r_surrendered_avg": 1.5,
+    "mfe_realization_pct_winners": 19.15,
+    "giveback_pct": 938.43,
+    "positive_mfe_closing_loser_pct": 64.25,
+    "r_target_hit_rates": {
+      "0.5R": 0.64,
+      "1.0R": 0.43,
+      "1.5R": 0.21,
+      "2.0R": 0.13
+    },
+    "setup_family_performance": {
+      "BREAKOUT_RETEST": {
+        "total_trades": 87.0,
+        "win_rate": 0.2759,
+        "net_pnl": -75.530996878,
+        "profit_factor": 0.57
+      },
+      "SUPPORT_RECLAIM": {
+        "total_trades": 188.0,
+        "win_rate": 0.2074,
+        "net_pnl": -295.411876142,
+        "profit_factor": 0.18
+      },
+      "TREND_PULLBACK": {
+        "total_trades": 276.0,
+        "win_rate": 0.3043,
+        "net_pnl": -366.06894385,
+        "profit_factor": 0.42
+      }
+    },
+    "regime_performance": {
+      "BEARISH_RANGE": {
+        "total_trades": 47.0,
+        "win_rate": 0.1277,
+        "net_pnl": -70.815588663,
+        "profit_factor": 0.02
+      },
+      "BULL": {
+        "total_trades": 137.0,
+        "win_rate": 0.2555,
+        "net_pnl": -224.759841348,
+        "profit_factor": 0.37
+      },
+      "BULLISH_RANGE": {
+        "total_trades": 108.0,
+        "win_rate": 0.1852,
+        "net_pnl": -177.965080951,
+        "profit_factor": 0.23
+      },
+      "NEUTRAL": {
+        "total_trades": 47.0,
+        "win_rate": 0.3191,
+        "net_pnl": -33.206210338,
+        "profit_factor": 0.53
+      },
+      "STRONG_BULL": {
+        "total_trades": 212.0,
+        "win_rate": 0.3349,
+        "net_pnl": -230.26509557,
+        "profit_factor": 0.47
+      }
+    }
+  }
+}

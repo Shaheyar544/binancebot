@@ -259,6 +259,30 @@ class BacktestEngine:
 
         return None, False
 
+    def update_breakeven_stop(
+        self,
+        candle: Candle,
+        entry_price: Decimal,
+        current_stop: Decimal,
+        initial_r: Decimal,
+        highest_price: Decimal,
+    ) -> Decimal:
+        """Evaluate causal +1.0R breakeven protection.
+
+        If highest price reached since entry >= entry_price + (initial_r * breakeven_r_multiple),
+        the stop is ratcheted up to entry_price + breakeven_buffer.
+        The stop is strictly monotonic and never moves downward.
+        """
+        if not self.exit_manager.enable_breakeven or initial_r <= Decimal("0.0"):
+            return current_stop
+
+        be_trigger = entry_price + (initial_r * self.exit_manager.breakeven_r_multiple)
+        if highest_price >= be_trigger:
+            be_stop = entry_price + self.exit_manager.breakeven_buffer
+            return max(current_stop, be_stop)
+
+        return current_stop
+
     def run(self, candles: Sequence[Candle]) -> BacktestResult:
         """Run event-driven simulation over chronological candles."""
         if not candles:
@@ -322,10 +346,20 @@ class BacktestEngine:
                 max_exposure = max(max_exposure, exposure)
 
                 # 4. Emergency loss check
+                trade_fees = (
+                    self.exchange.active_trade.fees_paid
+                    if self.exchange.active_trade is not None
+                    else Decimal("0.0")
+                )
+                trade_funding = (
+                    self.exchange.active_trade.funding_paid
+                    if self.exchange.active_trade is not None
+                    else Decimal("0.0")
+                )
                 if self.risk_engine.is_emergency_loss_breached(
                     self.exchange.position,
-                    self.exchange.total_fees_paid,
-                    self.exchange.total_funding_paid,
+                    trade_fees,
+                    trade_funding,
                 ):
                     exit_intent = self.risk_sizer.create_exit_intent(
                         price=candle.close,
@@ -342,11 +376,31 @@ class BacktestEngine:
 
                 # 5. Exit evaluation with Causal ATR and Intrabar Ambiguity Resolution
                 if current_stop_loss is not None:
-                    risk_dist = self.exchange.position.entry_price - current_stop_loss
+                    init_r = Decimal("0.0")
+                    if self.exchange.active_trade is not None:
+                        active_meta = active_trade_meta.get(self.exchange.active_trade.trade_id, {})
+                        init_r = Decimal(str(active_meta.get("initial_r", Decimal("0.0"))))
+                        new_stop = self.update_breakeven_stop(
+                            candle=candle,
+                            entry_price=self.exchange.position.entry_price,
+                            current_stop=current_stop_loss,
+                            initial_r=init_r,
+                            highest_price=highest_price_since_entry,
+                        )
+                        if new_stop > current_stop_loss:
+                            active_trade_meta.setdefault(self.exchange.active_trade.trade_id, {})[
+                                "breakeven_activated"
+                            ] = True
+                        current_stop_loss = new_stop
+
                     tp_target = (
                         self.exchange.position.entry_price
-                        + (risk_dist * self.exit_manager.partial_tp_ratio)
-                        if (not partial_tp_taken and risk_dist > Decimal("0"))
+                        + (init_r * self.exit_manager.partial_tp_ratio)
+                        if (
+                            not partial_tp_taken
+                            and init_r > Decimal("0")
+                            and self.exit_manager.enable_partial_tp
+                        )
                         else None
                     )
 
@@ -366,6 +420,10 @@ class BacktestEngine:
                         ):
                             self.exchange.process_order(resolved_intent, candle)
                             partial_tp_taken = True
+                            if self.exchange.active_trade is not None:
+                                active_trade_meta.setdefault(
+                                    self.exchange.active_trade.trade_id, {}
+                                )["partial_tp_taken"] = True
                         else:
                             # Full position exit
                             self.exchange.process_order(resolved_intent, candle)
@@ -425,6 +483,7 @@ class BacktestEngine:
                     analysis_15m.ema_50,
                     support_level=sup,
                     resistance_level=res,
+                    atr=analysis_15m.atr,
                 )
 
                 decision = self.strategy_engine.evaluate(
@@ -479,6 +538,26 @@ class BacktestEngine:
                                 highest_price_since_entry = candle.high
                                 partial_tp_taken = False
                                 current_adds = 0
+                                initial_r_val = candle.close - stop_ref
+                                allowed_risk = (
+                                    self.config.user_risk_config.allocated_funds * Decimal("0.01")
+                                )
+                                theo_qty = (
+                                    allowed_risk / initial_r_val
+                                    if initial_r_val > Decimal("0.0")
+                                    else Decimal("0.0")
+                                )
+                                actual_r_dollars = trade.size * initial_r_val
+                                actual_risk_pct = (
+                                    (actual_r_dollars / allowed_risk * Decimal("100.0"))
+                                    if allowed_risk > Decimal("0.0")
+                                    else Decimal("0.0")
+                                )
+                                r_over_atr = (
+                                    (initial_r_val / analysis_15m.atr)
+                                    if analysis_15m.atr > Decimal("0.0")
+                                    else Decimal("0.0")
+                                )
                                 active_trade_meta[trade.trade_id] = {
                                     "entry_score": Decimal("85.0"),
                                     "regime": regime.value,
@@ -486,7 +565,13 @@ class BacktestEngine:
                                         setup.family.value if setup else "TREND_PULLBACK"
                                     ),
                                     "initial_stop": stop_ref,
-                                    "initial_r": candle.close - stop_ref,
+                                    "initial_r": initial_r_val,
+                                    "configured_risk": allowed_risk,
+                                    "theoretical_risk": theo_qty * initial_r_val,
+                                    "actual_risk": actual_r_dollars,
+                                    "actual_risk_pct": actual_risk_pct,
+                                    "atr_at_entry": analysis_15m.atr,
+                                    "r_over_atr": r_over_atr,
                                 }
                     elif (
                         self.exchange.position is not None
@@ -754,9 +839,18 @@ class BacktestEngine:
                     gross_pnl=t.realized_pnl + t.fees_paid,
                     net_pnl=t.realized_pnl,
                     fees_paid=t.fees_paid,
+                    maker_fees_paid=t.maker_fees_paid,
+                    taker_fees_paid=t.taker_fees_paid,
                     funding_paid=t.funding_paid,
                     dca_count=1 if t.is_dca else 0,
-                    partial_tp_taken=False,
+                    partial_tp_taken=bool(meta.get("partial_tp_taken", False)),
+                    breakeven_activated=bool(meta.get("breakeven_activated", False)),
+                    configured_risk=Decimal(str(meta.get("configured_risk", Decimal("10.00")))),
+                    theoretical_risk=Decimal(str(meta.get("theoretical_risk", Decimal("0.0")))),
+                    actual_risk=Decimal(str(meta.get("actual_risk", Decimal("0.0")))),
+                    actual_risk_pct=Decimal(str(meta.get("actual_risk_pct", Decimal("0.0")))),
+                    atr_at_entry=Decimal(str(meta.get("atr_at_entry", Decimal("0.0")))),
+                    r_over_atr=Decimal(str(meta.get("r_over_atr", Decimal("0.0")))),
                 )
             )
 
@@ -932,7 +1026,10 @@ class BacktestEngine:
             profit_factor=profit_factor,
             max_drawdown_pct=round(max_drawdown_pct, 4),
             total_fees=self.exchange.total_fees_paid,
+            total_maker_fees=self.exchange.total_maker_fees_paid,
+            total_taker_fees=self.exchange.total_taker_fees_paid,
             total_funding=self.exchange.total_funding_paid,
+            fee_profile=self.policy.fee_profile,
             liquidations_count=self.exchange.liquidations_count,
             liquidation_model_status=(
                 "EXPLICIT_MODEL"

@@ -433,3 +433,129 @@ def test_backtest_exit_manager_partial_tp_and_stop(
     # Manually seed current_stop_loss via candle evaluation
     result = engine.run([c1, c2])
     assert len(result.trades) >= 1
+
+
+def test_emergency_stop_evaluates_trade_fees_not_cumulative_backtest_fees(
+    backtest_config: BacktestConfig,
+) -> None:
+    """Verify that lifetime cumulative backtest fees do not trigger emergency exit."""
+    from src.domain.enums import OrderSide
+    from src.domain.models import OrderIntent
+
+    engine = BacktestEngine(config=backtest_config)
+    # Simulate high cumulative historical fees across past trades
+    engine.exchange.total_fees_paid = Decimal("1000.00")
+    engine.exchange.total_funding_paid = Decimal("50.00")
+
+    # Open a fresh trade via process_order
+    intent = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="MARKET",
+        quantity=Decimal("1.0"),
+        price=Decimal("2700.0"),
+        notional=Decimal("2700.0"),
+        is_dca=False,
+        is_opening=True,
+        client_order_id="TEST_EMERGENCY_INIT",
+        reason="Test",
+    )
+    c0 = make_candle(0, "2700.0", "2705.0", "2695.0", "2700.0")
+    t = engine.exchange.process_order(intent, c0)
+    assert t is not None
+    assert engine.exchange.active_trade is not None
+    assert engine.exchange.active_trade.fees_paid < Decimal("5.00")
+    assert engine.exchange.position is not None
+    engine.active_trade_meta[t.trade_id] = {
+        "entry_score": Decimal("85.0"),
+        "regime": "BULL",
+        "entry_family": "TREND_PULLBACK",
+        "initial_stop": Decimal("2680.0"),
+        "initial_r": Decimal("20.0"),
+    }
+
+    # The emergency_loss_limit is $400.00.
+    # Cumulative fees ($1000) exceed $400, but active trade loss (-$10 PnL + ~$1 fee) does not.
+    c1 = make_candle(1, "2695.0", "2700.0", "2690.0", "2695.0")
+    engine.run([c1])
+
+    # Assert trade was NOT prematurely liquidated by emergency loss
+    breached = any(
+        trade.exit_reason == "EMERGENCY_STOP_LOSS_BREACHED"
+        for trade in engine.exchange.closed_trades
+    )
+    assert not breached
+
+
+def test_initial_r_immutable_across_dca_and_partial_tp(
+    backtest_config: BacktestConfig,
+) -> None:
+    """Verify that initial_r remains strictly unchanged in active_trade_meta
+    after DCA and Partial TP.
+    """
+    from src.domain.enums import OrderSide
+    from src.domain.models import OrderIntent
+
+    engine = BacktestEngine(config=backtest_config)
+    # 1. Initial Entry
+    intent1 = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="MARKET",
+        quantity=Decimal("0.200"),
+        price=Decimal("2700.0"),
+        notional=Decimal("540.0"),
+        is_dca=False,
+        is_opening=True,
+        client_order_id="INIT_ENTRY",
+        reason="Entry",
+    )
+    c0 = make_candle(0, "2700.0", "2705.0", "2695.0", "2700.0")
+    t1 = engine.exchange.process_order(intent1, c0)
+    assert t1 is not None
+    original_initial_r = Decimal("20.0")
+    engine.active_trade_meta[t1.trade_id] = {
+        "entry_score": Decimal("85.0"),
+        "regime": "BULL",
+        "entry_family": "TREND_PULLBACK",
+        "initial_stop": Decimal("2680.0"),
+        "initial_r": original_initial_r,
+    }
+
+    # 2. DCA Scale-In at lower price
+    c1 = make_candle(1, "2685.0", "2690.0", "2680.0", "2685.0")
+    intent_dca = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="MARKET",
+        quantity=Decimal("0.100"),
+        price=Decimal("2685.0"),
+        notional=Decimal("268.5"),
+        is_dca=True,
+        is_opening=True,
+        client_order_id="DCA_ADD",
+        reason="DCA",
+    )
+    engine.exchange.process_order(intent_dca, c1)
+
+    # Verify initial_r in metadata is strictly unchanged
+    assert engine.active_trade_meta[t1.trade_id]["initial_r"] == original_initial_r
+
+    # 3. Partial TP at higher price
+    c2 = make_candle(2, "2730.0", "2735.0", "2725.0", "2730.0")
+    intent_ptp = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.SELL,
+        order_type="LIMIT",
+        quantity=Decimal("0.150"),
+        price=Decimal("2730.0"),
+        notional=Decimal("409.5"),
+        is_dca=False,
+        is_opening=False,
+        client_order_id="PARTIAL_TP_1",
+        reason="TP",
+    )
+    engine.exchange.process_order(intent_ptp, c2)
+
+    # Verify initial_r remains immutable
+    assert engine.active_trade_meta[t1.trade_id]["initial_r"] == original_initial_r

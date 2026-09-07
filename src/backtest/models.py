@@ -31,6 +31,21 @@ class LiquidationModelPolicy(StrEnum):
     EXPLICIT_MODEL = "EXPLICIT_MODEL"  # Evaluated using defined test/exchange margin model
 
 
+class FeeProfile(BaseModel):
+    """Explicit versioned exchange fee configuration."""
+
+    model_config = ConfigDict(frozen=True)
+
+    profile_name: str = "BINANCE_STANDARD_ASSUMED"
+    maker_fee: Decimal = Field(default=Decimal("0.0002"), ge=Decimal("0"))
+    taker_fee: Decimal = Field(default=Decimal("0.0005"), ge=Decimal("0"))
+    funding_rate_8h: Decimal = Field(default=Decimal("0.0001"))
+    effective_from: int | None = None
+    effective_to: int | None = None
+    is_assumed: bool = True
+    account_tier: str = "VIP0"
+
+
 class BacktestExecutionPolicy(BaseModel):
     """Execution realism configuration for historical simulation."""
 
@@ -43,10 +58,11 @@ class BacktestExecutionPolicy(BaseModel):
     maker_fee: Decimal = Field(default=Decimal("0.0002"), ge=Decimal("0"))
     taker_fee: Decimal = Field(default=Decimal("0.0005"), ge=Decimal("0"))
     slippage_pct: Decimal = Field(default=Decimal("0.0001"), ge=Decimal("0"))
-    funding_rate_8h: Decimal = Field(default=Decimal("0.0001"), ge=Decimal("0"))
+    funding_rate_8h: Decimal = Field(default=Decimal("0.0001"))
     liquidation_policy: LiquidationModelPolicy = Field(
         default=LiquidationModelPolicy.EXPLICIT_MODEL
     )
+    fee_profile: FeeProfile = Field(default_factory=FeeProfile)
 
 
 class BacktestConfig(BaseModel):
@@ -102,6 +118,8 @@ class SimulatedTrade(BaseModel):
     notional: Decimal
     realized_pnl: Decimal = Decimal("0.0")
     fees_paid: Decimal = Decimal("0.0")
+    maker_fees_paid: Decimal = Decimal("0.0")
+    taker_fees_paid: Decimal = Decimal("0.0")
     funding_paid: Decimal = Decimal("0.0")
     is_dca: bool = False
     exit_reason: str | None = None
@@ -135,9 +153,18 @@ class PerTradeDiagnostic(BaseModel):
     gross_pnl: Decimal
     net_pnl: Decimal
     fees_paid: Decimal
+    maker_fees_paid: Decimal = Decimal("0.0")
+    taker_fees_paid: Decimal = Decimal("0.0")
     funding_paid: Decimal
     dca_count: int
     partial_tp_taken: bool
+    breakeven_activated: bool = False
+    configured_risk: Decimal = Decimal("10.00")
+    theoretical_risk: Decimal = Decimal("0.0")
+    actual_risk: Decimal = Decimal("0.0")
+    actual_risk_pct: Decimal = Decimal("0.0")
+    atr_at_entry: Decimal = Decimal("0.0")
+    r_over_atr: Decimal = Decimal("0.0")
 
 
 class BacktestResult(BaseModel):
@@ -155,7 +182,10 @@ class BacktestResult(BaseModel):
     profit_factor: Decimal = Decimal("0.0")
     max_drawdown_pct: Decimal = Decimal("0.0")
     total_fees: Decimal = Decimal("0.0")
+    total_maker_fees: Decimal = Decimal("0.0")
+    total_taker_fees: Decimal = Decimal("0.0")
     total_funding: Decimal = Decimal("0.0")
+    fee_profile: FeeProfile = Field(default_factory=FeeProfile)
     liquidations_count: int = 0
     expectancy: Decimal = Decimal("0.0")
     sharpe_ratio: Decimal = Decimal("0.0")

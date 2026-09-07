@@ -169,11 +169,19 @@ class ExitManager:
         partial_tp_pct: Decimal = Decimal("50.0"),
         trailing_atr_multiplier: Decimal = Decimal("2.0"),
         max_holding_hours: int | None = None,
+        enable_breakeven: bool = False,
+        breakeven_r_multiple: Decimal = Decimal("1.0"),
+        breakeven_buffer: Decimal = Decimal("0.50"),
+        enable_partial_tp: bool = True,
     ) -> None:
         self.partial_tp_ratio = partial_tp_ratio
         self.partial_tp_pct = partial_tp_pct
         self.trailing_atr_multiplier = trailing_atr_multiplier
         self.max_holding_hours = max_holding_hours
+        self.enable_breakeven = enable_breakeven
+        self.breakeven_r_multiple = breakeven_r_multiple
+        self.breakeven_buffer = breakeven_buffer
+        self.enable_partial_tp = enable_partial_tp
 
     def evaluate_position(
         self,

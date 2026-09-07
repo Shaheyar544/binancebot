@@ -70,3 +70,10 @@ class NewsFactLabel(StrEnum):
     EXPECTATION = "EXPECTATION"
     ANALYSIS = "ANALYSIS"
     AI_INTERPRETATION = "AI_INTERPRETATION"
+
+
+class LiquidityRole(StrEnum):
+    """Execution liquidity role. Distinguishes maker from taker execution."""
+
+    MAKER = "MAKER"
+    TAKER = "TAKER"

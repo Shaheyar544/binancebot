@@ -288,3 +288,238 @@ def test_simulated_exchange_sell_full_and_partial(backtest_config: BacktestConfi
     assert not exchange.has_open_position()
     assert len(exchange.closed_trades) == 1
     assert exchange.closed_trades[0].realized_pnl > Decimal("0")
+
+
+def test_zero_maker_fee_configuration(backtest_config: BacktestConfig) -> None:
+    """Verify that maker fee can be configured to zero and executes with 0 fee paid."""
+    from src.backtest.models import BacktestExecutionPolicy, FeeProfile
+    from src.domain.enums import LiquidityRole
+
+    fee_profile = FeeProfile(
+        profile_name="ZERO_MAKER_PROMO",
+        maker_fee=Decimal("0.0"),
+        taker_fee=Decimal("0.0005"),
+        is_assumed=True,
+    )
+    policy = BacktestExecutionPolicy(fee_profile=fee_profile)
+    config = BacktestConfig(
+        initial_balance=Decimal("10000.00"),
+        user_risk_config=backtest_config.user_risk_config,
+        execution_policy=policy,
+    )
+    exchange = SimulatedExchange(config=config)
+
+    # Passive limit buy below candle open (open = 2700, limit buy = 2695)
+    candle = make_candle("2700.00", "2705.00", "2690.00", "2700.00")
+    intent = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="LIMIT",
+        quantity=Decimal("1.0"),
+        price=Decimal("2695.00"),
+        notional=Decimal("2695.00"),
+        is_dca=False,
+        is_opening=True,
+        client_order_id="PASSIVE_BUY",
+        reason="Entry",
+    )
+    role = exchange.determine_liquidity_role(intent, candle)
+    assert role == LiquidityRole.MAKER
+
+    trade = exchange.process_order(intent, candle)
+    assert trade is not None
+    assert trade.maker_fees_paid == Decimal("0.0")
+    assert trade.fees_paid == Decimal("0.0")
+    assert exchange.total_fees_paid == Decimal("0.0")
+    assert exchange.total_maker_fees_paid == Decimal("0.0")
+
+
+def test_marketable_limit_classified_as_taker(backtest_config: BacktestConfig) -> None:
+    """Verify that a Limit Buy with price >= candle.open is classified as TAKER."""
+    from src.domain.enums import LiquidityRole
+
+    exchange = SimulatedExchange(config=backtest_config)
+    candle = make_candle("2700.00", "2710.00", "2695.00", "2705.00")
+
+    # Limit Buy at 2702 (>= open 2700.00) crosses the spread immediately
+    intent = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="LIMIT",
+        quantity=Decimal("1.0"),
+        price=Decimal("2702.00"),
+        notional=Decimal("2702.00"),
+        is_dca=False,
+        is_opening=True,
+        client_order_id="MARKETABLE_BUY",
+        reason="Marketable entry",
+    )
+    role = exchange.determine_liquidity_role(intent, candle)
+    assert role == LiquidityRole.TAKER
+
+    trade = exchange.process_order(intent, candle)
+    assert trade is not None
+    assert trade.taker_fees_paid > Decimal("0.0")
+    assert trade.maker_fees_paid == Decimal("0.0")
+    assert exchange.total_taker_fees_paid > Decimal("0.0")
+
+
+def test_funding_settlement_direction_and_size_invariance(backtest_config: BacktestConfig) -> None:
+    """Verify funding direction (debit for positive, credit for negative)
+    and partial/DCA settlement.
+    """
+    exchange = SimulatedExchange(config=backtest_config)
+    candle0 = make_candle("2700.00", "2705.00", "2695.00", "2700.00")
+
+    intent = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="MARKET",
+        quantity=Decimal("1.0"),
+        price=Decimal("2700.00"),
+        notional=Decimal("2700.00"),
+        is_dca=False,
+        is_opening=True,
+        client_order_id="BUY_FUNDING_TEST",
+        reason="Entry",
+    )
+    exchange.process_order(intent, candle0)
+    assert exchange.active_trade is not None
+    init_balance = exchange.wallet_balance
+
+    # 1. Positive funding debits wallet balance on long position
+    # notional = 1.0 * 2700.27 (after slippage)
+    pos_notional = exchange.position.size * exchange.position.entry_price  # type: ignore
+    exchange.apply_funding(1700000000000, funding_rate=Decimal("0.0001"))
+    expected_debit = pos_notional * Decimal("0.0001")
+    assert exchange.wallet_balance == init_balance - expected_debit
+    assert exchange.active_trade.funding_paid == expected_debit
+
+    # 2. Negative funding credits wallet balance on long position
+    bal_before_credit = exchange.wallet_balance
+    exchange.apply_funding(1700028800000, funding_rate=Decimal("-0.0001"))
+    expected_credit = pos_notional * Decimal("-0.0001")
+    assert exchange.wallet_balance == bal_before_credit - expected_credit
+
+    # 3. Partial exit before funding: funding is charged only on remaining size
+    candle1 = make_candle("2720.00", "2725.00", "2715.00", "2720.00")
+    intent_partial = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.SELL,
+        order_type="LIMIT",
+        quantity=Decimal("0.5"),
+        price=Decimal("2720.00"),
+        notional=Decimal("1360.00"),
+        is_dca=False,
+        is_opening=False,
+        client_order_id="PARTIAL_EXIT",
+        reason="TP",
+    )
+    exchange.process_order(intent_partial, candle1)
+    assert exchange.position.size == Decimal("0.5")  # type: ignore
+
+    bal_before_part = exchange.wallet_balance
+    exchange.apply_funding(1700057600000, funding_rate=Decimal("0.0002"))
+    remaining_notional = Decimal("0.5") * exchange.position.entry_price  # type: ignore
+    assert exchange.wallet_balance == bal_before_part - (remaining_notional * Decimal("0.0002"))
+
+    # 4. Complete exit: no funding charged after position closed
+    intent_close = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.SELL,
+        order_type="MARKET",
+        quantity=Decimal("0.5"),
+        price=Decimal("2720.00"),
+        notional=Decimal("1360.00"),
+        is_dca=False,
+        is_opening=False,
+        client_order_id="FULL_EXIT",
+        reason="Close",
+    )
+    exchange.process_order(intent_close, candle1)
+    assert not exchange.has_open_position()
+
+    bal_after_close = exchange.wallet_balance
+    exchange.apply_funding(1700086400000, funding_rate=Decimal("0.0005"))
+    # Wallet balance must remain completely unchanged when flat
+    assert exchange.wallet_balance == bal_after_close
+
+
+def test_multi_fill_accounting_consistency(backtest_config: BacktestConfig) -> None:
+    """Verify that multi-fill lifecycle (Entry -> DCA -> Partial TP -> Full Close)
+    maintains 0 remaining inventory and exact P&L.
+    """
+    exchange = SimulatedExchange(config=backtest_config)
+    c0 = make_candle("2700.00", "2710.00", "2690.00", "2700.00")
+
+    # 1. Entry: 0.200 XAU @ 2700
+    i1 = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="MARKET",
+        quantity=Decimal("0.200"),
+        price=Decimal("2700.00"),
+        notional=Decimal("540.00"),
+        is_dca=False,
+        is_opening=True,
+        client_order_id="E1",
+        reason="Entry",
+    )
+    exchange.process_order(i1, c0)
+
+    # 2. DCA: 0.100 XAU @ 2680
+    c1 = make_candle("2680.00", "2690.00", "2675.00", "2680.00")
+    i2 = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.BUY,
+        order_type="MARKET",
+        quantity=Decimal("0.100"),
+        price=Decimal("2680.00"),
+        notional=Decimal("268.00"),
+        is_dca=True,
+        is_opening=True,
+        client_order_id="DCA1",
+        reason="DCA",
+    )
+    exchange.process_order(i2, c1)
+    assert exchange.position.size == Decimal("0.300")  # type: ignore
+
+    # 3. Partial TP: 0.150 XAU @ 2720
+    c2 = make_candle("2720.00", "2730.00", "2710.00", "2720.00")
+    i3 = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.SELL,
+        order_type="LIMIT",
+        quantity=Decimal("0.150"),
+        price=Decimal("2720.00"),
+        notional=Decimal("408.00"),
+        is_dca=False,
+        is_opening=False,
+        client_order_id="TP1",
+        reason="Partial TP",
+    )
+    exchange.process_order(i3, c2)
+    assert exchange.position.size == Decimal("0.150")  # type: ignore
+
+    # 4. Final Close: 0.150 XAU @ 2710
+    c3 = make_candle("2710.00", "2715.00", "2700.00", "2710.00")
+    i4 = OrderIntent(
+        symbol="XAUUSDT",
+        side=OrderSide.SELL,
+        order_type="MARKET",
+        quantity=Decimal("0.150"),
+        price=Decimal("2710.00"),
+        notional=Decimal("406.50"),
+        is_dca=False,
+        is_opening=False,
+        client_order_id="EXIT1",
+        reason="Final Exit",
+    )
+    exchange.process_order(i4, c3)
+
+    # Invariant: zero remaining position
+    assert not exchange.has_open_position()
+    assert exchange.position is None
+    assert len(exchange.closed_trades) == 1
+    t = exchange.closed_trades[0]
+    assert t.fees_paid == t.maker_fees_paid + t.taker_fees_paid
