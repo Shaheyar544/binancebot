@@ -185,6 +185,10 @@ class BacktestResult(BaseModel):
     total_maker_fees: Decimal = Decimal("0.0")
     total_taker_fees: Decimal = Decimal("0.0")
     total_funding: Decimal = Decimal("0.0")
+    maker_entry_count: int = 0
+    taker_entry_count: int = 0
+    maker_exit_count: int = 0
+    taker_exit_count: int = 0
     fee_profile: FeeProfile = Field(default_factory=FeeProfile)
     liquidations_count: int = 0
     expectancy: Decimal = Decimal("0.0")

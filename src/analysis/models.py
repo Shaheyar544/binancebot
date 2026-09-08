@@ -163,6 +163,7 @@ class TimeframeAnalyzer:
         event_risk_active: bool = False,
     ) -> MultiTimeframeAnalysis:
         """Build canonical MultiTimeframeAnalysis across 1D, 4H, 1H, and 15M."""
+        from src.analysis.indicators import calculate_atr
         from src.analysis.regime import RegimeClassifier
 
         analysis_1d = cls.analyze_timeframe(candles_1d, Timeframe.D1)
@@ -178,15 +179,56 @@ class TimeframeAnalyzer:
                 if isinstance(regime_classifier, RegimeClassifier)
                 else RegimeClassifier()
             )
-            regime = classifier.classify(
+            # Compute rolling average ATR from historical 15M candles.
+            # Use a 50-period lookback of ATR snapshots for a stable average.
+            # FIX: Previously passed atr=avg_atr (same value), making HIGH_VOLATILITY
+            # mathematically impossible (atr >= 2.0 * atr is always false).
+            avg_atr = analysis_15m.atr  # safe fallback
+            if len(candles_15m) >= 64:  # 50 lookback + 14 ATR warmup
+                atr_lookback = 50
+                atr_snapshots: list[Decimal] = []
+                for i in range(atr_lookback):
+                    end_idx = len(candles_15m) - i
+                    if end_idx >= 14:
+                        snapshot_atr = calculate_atr(candles_15m[:end_idx], period=14)
+                        atr_snapshots.append(snapshot_atr)
+                if atr_snapshots:
+                    avg_atr = sum(atr_snapshots) / Decimal(str(len(atr_snapshots)))
+
+            regime_4h = classifier.classify(
+                ema_10=analysis_4h.ema_10,
+                ema_20=analysis_4h.ema_20,
+                ema_50=analysis_4h.ema_50,
+                ema_200=analysis_4h.ema_200,
+                current_close=analysis_4h.current_close,
+                atr=analysis_4h.atr,
+                avg_atr=analysis_4h.atr,
+                is_bullish_structure=analysis_4h.is_bullish,
+            )
+            regime_1h = classifier.classify(
+                ema_10=analysis_1h.ema_10,
+                ema_20=analysis_1h.ema_20,
+                ema_50=analysis_1h.ema_50,
+                ema_200=analysis_1h.ema_200,
+                current_close=analysis_1h.current_close,
+                atr=analysis_1h.atr,
+                avg_atr=analysis_1h.atr,
+                is_bullish_structure=analysis_1h.is_bullish,
+            )
+            regime_15m = classifier.classify(
                 ema_10=analysis_15m.ema_10,
                 ema_20=analysis_15m.ema_20,
                 ema_50=analysis_15m.ema_50,
                 ema_200=analysis_15m.ema_200,
                 current_close=analysis_15m.current_close,
                 atr=analysis_15m.atr,
-                avg_atr=analysis_15m.atr,
+                avg_atr=avg_atr,
                 is_bullish_structure=analysis_15m.is_bullish,
+            )
+            regime = classifier.classify_weighted(
+                regime_4h=regime_4h,
+                regime_1h=regime_1h,
+                regime_15m=regime_15m,
             )
 
         timestamp = candles_15m[-1].close_time if candles_15m else 0

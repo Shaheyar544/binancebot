@@ -1,0 +1,85 @@
+{
+  "dataset_candles": 25857,
+  "overall": {
+    "total_trades": 245,
+    "winning_trades": 73,
+    "losing_trades": 172,
+    "win_rate": 29.8,
+    "net_profit": -304.53,
+    "profit_factor": 0.376,
+    "max_drawdown_pct": 7.55,
+    "total_fees_paid": 436.86,
+    "maker_fees_paid": 29.31,
+    "taker_fees_paid": 407.55,
+    "funding_paid": 12.11,
+    "expectancy": -1.24,
+    "sharpe_ratio": -0.26,
+    "sortino_ratio": -0.42
+  },
+  "dca_trades": {
+    "trades": 8,
+    "wins": 4,
+    "losses": 4,
+    "win_rate": 50.0,
+    "gross_profit": 74.51,
+    "gross_loss": 21.4,
+    "net_pnl": 53.11,
+    "profit_factor": 3.482,
+    "fees_paid": 12.5,
+    "funding_paid": 2.26,
+    "net_after_fees": 38.36
+  },
+  "non_dca_trades": {
+    "trades": 237,
+    "wins": 69,
+    "losses": 168,
+    "win_rate": 29.11,
+    "gross_profit": 109.35,
+    "gross_loss": 466.99,
+    "net_pnl": -357.64,
+    "profit_factor": 0.234,
+    "fees_paid": 424.36,
+    "funding_paid": 9.86,
+    "net_after_fees": -791.86
+  },
+  "setup_family_performance": {
+    "BREAKOUT_RETEST": {
+      "trades": 90,
+      "win_rate": 26.67,
+      "net_pnl": -120.13,
+      "profit_factor": 0.35
+    },
+    "TREND_PULLBACK": {
+      "trades": 155,
+      "win_rate": 31.61,
+      "net_pnl": -184.4,
+      "profit_factor": 0.39
+    }
+  },
+  "regime_performance": {
+    "BULL": {
+      "trades": 74,
+      "win_rate": 31.08,
+      "net_pnl": -82.25,
+      "profit_factor": 0.34
+    },
+    "BULLISH_RANGE": {
+      "trades": 6,
+      "win_rate": 16.67,
+      "net_pnl": -19.99,
+      "profit_factor": 0.04
+    },
+    "HIGH_VOLATILITY": {
+      "trades": 3,
+      "win_rate": 0.0,
+      "net_pnl": -2.06,
+      "profit_factor": 0.0
+    },
+    "STRONG_BULL": {
+      "trades": 162,
+      "win_rate": 30.25,
+      "net_pnl": -200.24,
+      "profit_factor": 0.41
+    }
+  }
+}

@@ -1,0 +1,89 @@
+{
+  "dataset_candles": 25857,
+  "total_trades": 224,
+  "micro_stop_audit": {
+    "summary": {
+      "initial_r_lt_0_25": 0,
+      "initial_r_lt_0_50": 1,
+      "initial_r_lt_1_00": 12,
+      "r_over_atr_lt_0_1": 0,
+      "r_over_atr_lt_0_2": 0,
+      "r_over_atr_lt_0_3": 0,
+      "r_over_atr_lt_0_5": 0,
+      "initial_r_lt_0_1": 0
+    },
+    "by_entry_family": {
+      "TREND_PULLBACK": {
+        "count_r_lt_1_00": 8,
+        "count_r_over_atr_lt_0_5": 0,
+        "total": 150
+      },
+      "BREAKOUT_RETEST": {
+        "count_r_lt_1_00": 4,
+        "count_r_over_atr_lt_0_5": 0,
+        "total": 74
+      }
+    },
+    "by_regime": {
+      "BULL": {
+        "count_r_lt_1_00": 5,
+        "count_r_over_atr_lt_0_5": 0,
+        "total": 75
+      },
+      "STRONG_BULL": {
+        "count_r_lt_1_00": 7,
+        "count_r_over_atr_lt_0_5": 0,
+        "total": 141
+      },
+      "HIGH_VOLATILITY": {
+        "count_r_lt_1_00": 0,
+        "count_r_over_atr_lt_0_5": 0,
+        "total": 3
+      },
+      "BULLISH_RANGE": {
+        "count_r_lt_1_00": 0,
+        "count_r_over_atr_lt_0_5": 0,
+        "total": 5
+      }
+    }
+  },
+  "dca_vs_non_dca_comparison": {
+    "dca_trades_stats": {
+      "total_trades": 88,
+      "winning_trades": 25,
+      "losing_trades": 63,
+      "win_rate_pct": 28.41,
+      "gross_profit": 127.86,
+      "gross_loss": 252.69,
+      "net_pnl": -306.32,
+      "profit_factor": 0.506,
+      "total_fees": 172.78,
+      "avg_r_realized": -0.287,
+      "median_r_realized": -1.0,
+      "avg_loss_dollars": -6.18,
+      "avg_win_dollars": 3.32,
+      "max_loss_dollars": -13.99,
+      "avg_mfe_r": 1.32,
+      "avg_r_surrendered": 1.61
+    },
+    "non_dca_trades_stats": {
+      "total_trades": 136,
+      "winning_trades": 18,
+      "losing_trades": 118,
+      "win_rate_pct": 13.24,
+      "gross_profit": 134.96,
+      "gross_loss": 352.18,
+      "net_pnl": -453.53,
+      "profit_factor": 0.383,
+      "total_fees": 233.04,
+      "avg_r_realized": -0.612,
+      "median_r_realized": -1.08,
+      "avg_loss_dollars": -4.76,
+      "avg_win_dollars": 6.02,
+      "max_loss_dollars": -12.39,
+      "avg_mfe_r": 1.13,
+      "avg_r_surrendered": 1.74
+    }
+  },
+  "trade_e409b654_autopsy": null
+}

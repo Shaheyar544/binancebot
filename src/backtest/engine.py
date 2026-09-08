@@ -16,7 +16,7 @@ from src.backtest.models import (
     PerTradeDiagnostic,
     SimulatedTrade,
 )
-from src.domain.enums import DecisionState, Timeframe
+from src.domain.enums import DecisionState, MarketRegime, Timeframe
 from src.domain.models import Candle, OrderIntent
 from src.exchange.metadata import SymbolFilters
 from src.market_data.enums import MarketDataHealth
@@ -266,11 +266,12 @@ class BacktestEngine:
         current_stop: Decimal,
         initial_r: Decimal,
         highest_price: Decimal,
+        current_atr: Decimal | None = None,
     ) -> Decimal:
-        """Evaluate causal +1.0R breakeven protection.
+        """Evaluate causal breakeven protection.
 
         If highest price reached since entry >= entry_price + (initial_r * breakeven_r_multiple),
-        the stop is ratcheted up to entry_price + breakeven_buffer.
+        the stop is ratcheted up to entry_price + breakeven_buffer (or 0.3*ATR if dynamic).
         The stop is strictly monotonic and never moves downward.
         """
         if not self.exit_manager.enable_breakeven or initial_r <= Decimal("0.0"):
@@ -278,7 +279,16 @@ class BacktestEngine:
 
         be_trigger = entry_price + (initial_r * self.exit_manager.breakeven_r_multiple)
         if highest_price >= be_trigger:
-            be_stop = entry_price + self.exit_manager.breakeven_buffer
+            buffer = (
+                current_atr * Decimal("0.3")
+                if (
+                    current_atr is not None
+                    and current_atr > Decimal("0")
+                    and self.exit_manager.breakeven_buffer == Decimal("0.50")
+                )
+                else self.exit_manager.breakeven_buffer
+            )
+            be_stop = entry_price + buffer
             return max(current_stop, be_stop)
 
         return current_stop
@@ -298,6 +308,7 @@ class BacktestEngine:
         max_adds = 0
         active_trade_meta: dict[str, dict[str, object]] = dict(self.active_trade_meta)
         trade_diagnostics: list[PerTradeDiagnostic] = []
+        atr_15m_history: list[Decimal] = []
 
         for idx, candle in enumerate(candles):
             if len(candles) >= 5000 and idx % 2500 == 0:
@@ -386,6 +397,7 @@ class BacktestEngine:
                             current_stop=current_stop_loss,
                             initial_r=init_r,
                             highest_price=highest_price_since_entry,
+                            current_atr=current_atr,
                         )
                         if new_stop > current_stop_loss:
                             active_trade_meta.setdefault(self.exchange.active_trade.trade_id, {})[
@@ -393,16 +405,20 @@ class BacktestEngine:
                             ] = True
                         current_stop_loss = new_stop
 
-                    tp_target = (
-                        self.exchange.position.entry_price
-                        + (init_r * self.exit_manager.partial_tp_ratio)
-                        if (
-                            not partial_tp_taken
-                            and init_r > Decimal("0")
-                            and self.exit_manager.enable_partial_tp
-                        )
-                        else None
-                    )
+                    # Compute active take-profit target:
+                    # TP1 (partial) when partial_tp not yet taken
+                    # TP2 (final runner) when partial_tp already taken
+                    tp_target: Decimal | None = None
+                    if init_r > Decimal("0") and self.exit_manager.enable_partial_tp:
+                        if not partial_tp_taken:
+                            tp_target = self.exchange.position.entry_price + (
+                                init_r * self.exit_manager.partial_tp_ratio
+                            )
+                        else:
+                            # TP2: final runner target
+                            tp_target = self.exchange.position.entry_price + (
+                                init_r * self.exit_manager.final_tp_ratio
+                            )
 
                     resolved_intent, _ = self.resolve_intrabar_exit(
                         candle=candle,
@@ -418,18 +434,50 @@ class BacktestEngine:
                             "PARTIAL_TP" in resolved_intent.client_order_id
                             or "TP" in resolved_intent.client_order_id
                         ):
-                            self.exchange.process_order(resolved_intent, candle)
-                            partial_tp_taken = True
-                            if self.exchange.active_trade is not None:
-                                active_trade_meta.setdefault(
-                                    self.exchange.active_trade.trade_id, {}
-                                )["partial_tp_taken"] = True
+                            if not partial_tp_taken:
+                                # TP1: partial take profit
+                                self.exchange.process_order(resolved_intent, candle)
+                                partial_tp_taken = True
+                                if self.exchange.active_trade is not None:
+                                    active_trade_meta.setdefault(
+                                        self.exchange.active_trade.trade_id, {}
+                                    )["partial_tp_taken"] = True
+                            else:
+                                # TP2: final runner exit — close remaining position
+                                self.exchange.process_order(resolved_intent, candle)
+                                current_stop_loss = None
+                                partial_tp_taken = False
+                                current_adds = 0
                         else:
-                            # Full position exit
+                            # Full position exit (stop/trailing)
                             self.exchange.process_order(resolved_intent, candle)
                             current_stop_loss = None
                             partial_tp_taken = False
                             current_adds = 0
+
+                # Max holding time exit
+                if (
+                    self.exchange.has_open_position()
+                    and self.exchange.position is not None
+                    and self.exit_manager.max_holding_hours is not None
+                    and self.exchange.active_trade is not None
+                ):
+                    elapsed_ms = candle.close_time - self.exchange.active_trade.entry_time
+                    max_ms = self.exit_manager.max_holding_hours * 3600 * 1000
+                    if elapsed_ms >= max_ms:
+                        exit_intent = self.risk_sizer.create_exit_intent(
+                            price=candle.close,
+                            quantity=self.exchange.position.size,
+                            client_order_id=f"TIME_EXIT_{candle.open_time}",
+                            reason=(
+                                f"Max holding time reached ({self.exit_manager.max_holding_hours}h)"
+                            ),
+                            order_type="MARKET",
+                        )
+                        self.exchange.process_order(exit_intent, candle)
+                        current_stop_loss = None
+                        partial_tp_taken = False
+                        current_adds = 0
 
             # 6. Strategy Evaluation and Entry / DCA
             if not self.is_news_locked(candle.open_time) and len(history) >= 20:
@@ -455,15 +503,45 @@ class BacktestEngine:
                     else analysis_15m.model_copy(update={"timeframe": Timeframe.D1})
                 )
 
-                regime = self.regime_classifier.classify(
+                # Compute rolling average ATR for HIGH_VOLATILITY detection.
+                atr_15m_history.append(analysis_15m.atr)
+                recent_atrs = atr_15m_history[-50:]
+                avg_atr_val = sum(recent_atrs) / Decimal(str(len(recent_atrs)))
+
+                regime_4h = self.regime_classifier.classify(
+                    analysis_4h.ema_10,
+                    analysis_4h.ema_20,
+                    analysis_4h.ema_50,
+                    analysis_4h.ema_200,
+                    analysis_4h.current_close,
+                    analysis_4h.atr,
+                    analysis_4h.atr,
+                    analysis_4h.is_bullish,
+                )
+                regime_1h = self.regime_classifier.classify(
+                    analysis_1h.ema_10,
+                    analysis_1h.ema_20,
+                    analysis_1h.ema_50,
+                    analysis_1h.ema_200,
+                    analysis_1h.current_close,
+                    analysis_1h.atr,
+                    analysis_1h.atr,
+                    analysis_1h.is_bullish,
+                )
+                regime_15m = self.regime_classifier.classify(
                     analysis_15m.ema_10,
                     analysis_15m.ema_20,
                     analysis_15m.ema_50,
                     analysis_15m.ema_200,
                     analysis_15m.current_close,
                     analysis_15m.atr,
-                    analysis_15m.atr,
+                    avg_atr_val,
                     analysis_15m.is_bullish,
+                )
+                regime = self.regime_classifier.classify_weighted(
+                    regime_4h=regime_4h,
+                    regime_1h=regime_1h,
+                    regime_15m=regime_15m,
                 )
 
                 mtf = MultiTimeframeAnalysis(
@@ -477,6 +555,31 @@ class BacktestEngine:
                 )
 
                 sup, res = self.orchestrator.identify_levels(recent_history)
+
+                # Regime invalidation exit: exit open position if regime turns hostile
+                if (
+                    self.exchange.has_open_position()
+                    and self.exchange.position is not None
+                    and regime
+                    in {
+                        MarketRegime.BEAR,
+                        MarketRegime.STRONG_BEAR,
+                        MarketRegime.BEARISH_RANGE,
+                    }
+                ):
+                    exit_intent = self.risk_sizer.create_exit_intent(
+                        price=candle.close,
+                        quantity=self.exchange.position.size,
+                        client_order_id=f"REGIME_EXIT_{candle.open_time}",
+                        reason=f"Regime invalidated to {regime.value}; exiting long",
+                        order_type="MARKET",
+                    )
+                    self.exchange.process_order(exit_intent, candle)
+                    current_stop_loss = None
+                    partial_tp_taken = False
+                    current_adds = 0
+                    continue
+
                 setup = self.orchestrator.evaluate_setups(
                     recent_history,
                     analysis_15m.ema_20,
@@ -486,12 +589,27 @@ class BacktestEngine:
                     atr=analysis_15m.atr,
                 )
 
+                # Evaluate dynamic reward_ratio and favorable_rr for gradient scoring
+                favorable_rr = False
+                reward_ratio: Decimal | None = None
+                if setup is not None and setup.stop_loss_ref < candle.close:
+                    rr_risk_distance = candle.close - setup.stop_loss_ref
+                    if rr_risk_distance > Decimal("0"):
+                        upside_target = (
+                            res
+                            if (res is not None and res > candle.close)
+                            else candle.close + (analysis_15m.atr * Decimal("2.0"))
+                        )
+                        reward_ratio = (upside_target - candle.close) / rr_risk_distance
+                        favorable_rr = reward_ratio >= Decimal("1.5")
+
                 decision = self.strategy_engine.evaluate(
                     mtf=mtf,
                     data_health=MarketDataHealth.HEALTHY,
                     has_setup=setup is not None,
-                    favorable_rr=True,
+                    favorable_rr=favorable_rr,
                     use_gradient_scoring=True,
+                    reward_ratio=reward_ratio,
                 )
 
                 if decision.decision_state == DecisionState.BUY:
@@ -507,11 +625,17 @@ class BacktestEngine:
                         if stop_ref >= candle.close:
                             stop_ref = candle.close - Decimal("10.0")
 
+                        # FIX 1.7: Use user's risk_per_trade_pct from config
+                        _user_risk_pct = (
+                            self.config.user_risk_config.risk_per_trade_pct
+                            if self.config.user_risk_config.risk_per_trade_pct is not None
+                            else Decimal("1.0")
+                        )
                         target_notional = self.risk_sizer.calculate_risk_based_notional(
                             entry_price=candle.close,
                             stop_price=stop_ref,
                             allocated_funds=self.config.user_risk_config.allocated_funds,
-                            risk_per_trade_pct=Decimal("1.0"),
+                            risk_per_trade_pct=_user_risk_pct,
                             leverage=self.config.user_risk_config.leverage,
                         )
                         acc_state = AccountRiskState(
@@ -539,8 +663,8 @@ class BacktestEngine:
                                 partial_tp_taken = False
                                 current_adds = 0
                                 initial_r_val = candle.close - stop_ref
-                                allowed_risk = (
-                                    self.config.user_risk_config.allocated_funds * Decimal("0.01")
+                                allowed_risk = self.config.user_risk_config.allocated_funds * (
+                                    _user_risk_pct / Decimal("100.0")
                                 )
                                 theo_qty = (
                                     allowed_risk / initial_r_val
@@ -558,8 +682,20 @@ class BacktestEngine:
                                     if analysis_15m.atr > Decimal("0.0")
                                     else Decimal("0.0")
                                 )
+                                # FIX 1.6: Record real computed score, not hardcoded 85.0
+                                if "score" in decision.indicators:
+                                    _real_score = Decimal(str(decision.indicators["score"]))
+                                elif "score=" in decision.reason:
+                                    try:
+                                        _real_score = Decimal(
+                                            decision.reason.split("score=")[1].split(")")[0].strip()
+                                        )
+                                    except Exception:
+                                        _real_score = Decimal("85.0")
+                                else:
+                                    _real_score = Decimal("85.0")
                                 active_trade_meta[trade.trade_id] = {
-                                    "entry_score": Decimal("85.0"),
+                                    "entry_score": _real_score,
                                     "regime": regime.value,
                                     "entry_family": (
                                         setup.family.value if setup else "TREND_PULLBACK"
@@ -578,25 +714,51 @@ class BacktestEngine:
                         and current_adds < (self.config.user_risk_config.max_entries - 1)
                         and self.exchange.wallet_balance > Decimal("0.0")
                     ):
-                        dca_notional = min(
-                            Decimal("500.00"),
-                            self.config.user_risk_config.allocated_funds * Decimal("0.2"),
+                        pos_r = Decimal("0.0")
+                        if (
+                            current_stop_loss is not None
+                            and candle.close != self.exchange.position.entry_price
+                        ):
+                            r_dist = self.exchange.position.entry_price - current_stop_loss
+                            if r_dist > Decimal("0"):
+                                pos_r = (candle.close - self.exchange.position.entry_price) / r_dist
+
+                        dca_decision = self.strategy_engine.evaluate_dca(
+                            mtf=mtf,
+                            current_position_r=pos_r,
+                            data_health=MarketDataHealth.HEALTHY,
+                            has_setup=(setup is not None),
+                            favorable_rr=favorable_rr,
                         )
-                        avail_bal = max(Decimal("0.0"), self.exchange.wallet_balance)
-                        acc_state = AccountRiskState(
-                            wallet_balance=avail_bal,
-                            available_balance=avail_bal,
-                            total_open_exposure=self.exchange.position.size * candle.close,
-                            realized_daily_loss=Decimal("0.0"),
-                            unrealized_pnl=Decimal("0.0"),
-                            open_entries_count=current_adds + 1,
+                        effective_dca_decision = (
+                            decision
+                            if decision.decision_state == DecisionState.BUY
+                            else dca_decision
                         )
-                        dca_check = self.risk_engine.evaluate_dca(
-                            decision,
-                            candle.close,
-                            acc_state,
-                            dca_notional,
-                        )
+
+                        if effective_dca_decision.decision_state in {
+                            DecisionState.BUY,
+                            DecisionState.ADD,
+                        }:
+                            dca_notional = min(
+                                Decimal("500.00"),
+                                self.config.user_risk_config.allocated_funds * Decimal("0.2"),
+                            )
+                            avail_bal = max(Decimal("0.0"), self.exchange.wallet_balance)
+                            acc_state = AccountRiskState(
+                                wallet_balance=avail_bal,
+                                available_balance=avail_bal,
+                                total_open_exposure=self.exchange.position.size * candle.close,
+                                realized_daily_loss=Decimal("0.0"),
+                                unrealized_pnl=Decimal("0.0"),
+                                open_entries_count=current_adds + 1,
+                            )
+                            dca_check = self.risk_engine.evaluate_dca(
+                                effective_dca_decision,
+                                candle.close,
+                                acc_state,
+                                dca_notional,
+                            )
                         if dca_check.is_approved:
                             intent = self.risk_sizer.create_dca_intent(
                                 price=candle.close,
@@ -608,6 +770,18 @@ class BacktestEngine:
                             if dca_trade:
                                 current_adds += 1
                                 max_adds = max(max_adds, current_adds)
+                                # Fix 7: Recalculate initial_r after DCA to prevent
+                                # stale breakeven/TP targets
+                                if (
+                                    self.exchange.active_trade is not None
+                                    and current_stop_loss is not None
+                                    and self.exchange.position is not None
+                                ):
+                                    new_r = self.exchange.position.entry_price - current_stop_loss
+                                    if new_r > Decimal("0"):
+                                        active_trade_meta.setdefault(
+                                            self.exchange.active_trade.trade_id, {}
+                                        )["initial_r"] = new_r
 
             # 7. Track equity and drawdown
             current_equity = self.exchange.wallet_balance
@@ -1029,6 +1203,10 @@ class BacktestEngine:
             total_maker_fees=self.exchange.total_maker_fees_paid,
             total_taker_fees=self.exchange.total_taker_fees_paid,
             total_funding=self.exchange.total_funding_paid,
+            maker_entry_count=self.exchange.maker_entry_count,
+            taker_entry_count=self.exchange.taker_entry_count,
+            maker_exit_count=self.exchange.maker_exit_count,
+            taker_exit_count=self.exchange.taker_exit_count,
             fee_profile=self.policy.fee_profile,
             liquidations_count=self.exchange.liquidations_count,
             liquidation_model_status=(

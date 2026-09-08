@@ -36,6 +36,10 @@ class SimulatedExchange:
         self.liquidations_count = 0
         self.active_trade: SimulatedTrade | None = None
         self.dca_fills_count = 0
+        self.maker_entry_count = 0
+        self.taker_entry_count = 0
+        self.maker_exit_count = 0
+        self.taker_exit_count = 0
 
     def has_open_position(self) -> bool:
         """Return True if there is currently an open position."""
@@ -66,23 +70,33 @@ class SimulatedExchange:
 
         A MARKET order always removes liquidity (TAKER).
         A LIMIT order is marketable (TAKER) if:
-        - BUY: limit price >= candle.open (crosses available liquidity immediately at bar open)
-        - SELL: limit price <= candle.open (crosses available liquidity immediately at bar open)
-        A non-marketable LIMIT order rests passively in the order book (MAKER) until
-        price reaches it.
+        - BUY: limit price > candle.open (crosses available liquidity above open)
+        - SELL: limit price < candle.open (marketable sell below open)
+
+        Passive resting orders:
+        - BUY LIMIT at or below candle.open rests in order book -> MAKER (0.02% fee)
+        - SELL TP LIMIT placed above candle.open rests in order book -> MAKER (0.02% fee)
+        - Stop loss / emergency exits -> TAKER (0.05% fee + slippage)
         """
         if intent.order_type == "MARKET":
             return LiquidityRole.TAKER
 
-        if intent.side == OrderSide.BUY:
-            if intent.price >= candle.open:
-                return LiquidityRole.TAKER
-            return LiquidityRole.MAKER
-
+        # Take Profit limit orders resting above market
         if intent.side == OrderSide.SELL:
+            if "TP" in intent.client_order_id or "PARTIAL_TP" in intent.client_order_id:
+                if intent.price >= candle.open:
+                    return LiquidityRole.MAKER
+                return LiquidityRole.TAKER
+            # Other limit sells (e.g. stop loss limit)
             if intent.price <= candle.open:
                 return LiquidityRole.TAKER
             return LiquidityRole.MAKER
+
+        if intent.side == OrderSide.BUY:
+            # Passive entry or DCA limit order resting on the bid
+            if intent.price <= candle.open:
+                return LiquidityRole.MAKER
+            return LiquidityRole.TAKER
 
         return LiquidityRole.TAKER
 
@@ -109,8 +123,10 @@ class SimulatedExchange:
             self.total_fees_paid += fee
             if is_taker:
                 self.total_taker_fees_paid += fee
+                self.taker_entry_count += 1
             else:
                 self.total_maker_fees_paid += fee
+                self.maker_entry_count += 1
             self.wallet_balance -= fee
 
             if self.position is None:
@@ -212,8 +228,10 @@ class SimulatedExchange:
             self.total_fees_paid += fee
             if is_taker:
                 self.total_taker_fees_paid += fee
+                self.taker_exit_count += 1
             else:
                 self.total_maker_fees_paid += fee
+                self.maker_exit_count += 1
             self.wallet_balance -= fee
 
             # Realized PnL strictly on the executed portion

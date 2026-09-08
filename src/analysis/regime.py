@@ -68,3 +68,60 @@ class RegimeClassifier:
             return MarketRegime.BEARISH_RANGE
 
         return MarketRegime.NEUTRAL
+
+    def classify_weighted(
+        self,
+        regime_4h: MarketRegime,
+        regime_1h: MarketRegime,
+        regime_15m: MarketRegime,
+    ) -> MarketRegime:
+        """Composite regime using higher-timeframe dominance.
+
+        4H has veto power: if 4H is BEAR/STRONG_BEAR/BEARISH_RANGE,
+        the composite cannot be bullish.
+
+        Weighting: 4H (50%), 1H (30%), 15M (20%)
+        """
+        if MarketRegime.EVENT_RISK in {regime_4h, regime_1h, regime_15m}:
+            return MarketRegime.EVENT_RISK
+
+        if regime_15m == MarketRegime.HIGH_VOLATILITY or regime_1h == MarketRegime.HIGH_VOLATILITY:
+            return MarketRegime.HIGH_VOLATILITY
+
+        # 4H Veto rule: if 4H is hostile, composite cannot be bullish
+        if regime_4h in {MarketRegime.BEAR, MarketRegime.STRONG_BEAR, MarketRegime.BEARISH_RANGE}:
+            return regime_4h
+
+        # Score mapping
+        score_map = {
+            MarketRegime.STRONG_BULL: Decimal("3.0"),
+            MarketRegime.BULL: Decimal("2.0"),
+            MarketRegime.BULLISH_RANGE: Decimal("1.0"),
+            MarketRegime.NEUTRAL: Decimal("0.0"),
+            MarketRegime.BEARISH_RANGE: Decimal("-1.0"),
+            MarketRegime.BEAR: Decimal("-2.0"),
+            MarketRegime.STRONG_BEAR: Decimal("-3.0"),
+            MarketRegime.HIGH_VOLATILITY: Decimal("0.0"),
+            MarketRegime.EVENT_RISK: Decimal("0.0"),
+        }
+
+        s4 = score_map.get(regime_4h, Decimal("0.0"))
+        s1 = score_map.get(regime_1h, Decimal("0.0"))
+        sm = score_map.get(regime_15m, Decimal("0.0"))
+
+        composite_score = (s4 * Decimal("0.50")) + (s1 * Decimal("0.30")) + (sm * Decimal("0.20"))
+
+        if composite_score >= Decimal("2.5"):
+            return MarketRegime.STRONG_BULL
+        elif composite_score >= Decimal("1.5"):
+            return MarketRegime.BULL
+        elif composite_score >= Decimal("0.5"):
+            return MarketRegime.BULLISH_RANGE
+        elif composite_score <= Decimal("-2.5"):
+            return MarketRegime.STRONG_BEAR
+        elif composite_score <= Decimal("-1.5"):
+            return MarketRegime.BEAR
+        elif composite_score <= Decimal("-0.5"):
+            return MarketRegime.BEARISH_RANGE
+        else:
+            return MarketRegime.NEUTRAL

@@ -1,0 +1,103 @@
+{
+  "dataset_identity": {
+    "symbol": "XAUUSDT",
+    "timeframe": "15m",
+    "candle_count": 25857,
+    "sha256_hash": "67234b6b0ae6cd6bad95c25b9cd86e834703481c6be67d938b671c7922496fea",
+    "first_candle_open_time_ms": 1765440000000,
+    "first_candle_open_time_iso": "2025-12-11T08:00:00+00:00",
+    "last_candle_close_time_ms": 1788711299999,
+    "last_candle_close_time_iso": "2026-09-06T16:14:59.999000+00:00",
+    "source_file": "data/xauusdt_15m.json"
+  },
+  "breakeven_configuration_audit": {
+    "configured_enable_breakeven": true,
+    "configured_breakeven_r_multiple": 1.0,
+    "configured_breakeven_buffer": 0.5,
+    "dynamic_atr_buffer_multiplier": 0.3,
+    "runtime_effective_rule": "If highest_price >= entry_price + (initial_r * 1.0), ratchet stop to entry_price + (0.30 * ATR if buffer==0.50 else buffer)",
+    "discrepancy_resolution": "Trade e409b654 MFE reached +0.47R. The narrative report referenced a hypothetical +0.80R trigger from early diagnostic notes, but the canonical runtime engine strictly enforces +1.0R. In either case (+0.80R or +1.0R), the breakeven threshold was never reached."
+  },
+  "dca_incremental_risk_safety_verification": {
+    "max_individual_dca_notional_observed": 200.0,
+    "max_individual_dca_notional_cap": 500.0,
+    "max_individual_dca_notional_compliant": true,
+    "max_total_exposure_observed": 1650.929236416,
+    "max_total_exposure_limit": 2000.0,
+    "max_total_exposure_compliant": true,
+    "max_dca_adds_observed": 1,
+    "max_dca_adds_limit": 2,
+    "max_dca_adds_compliant": true
+  },
+  "category_performance_breakdown": {
+    "A_FRESH_BULLISH_CONFIRMATION": {
+      "trade_count": 3,
+      "winning_trades": 1,
+      "losing_trades": 2,
+      "win_rate_pct": 33.33,
+      "gross_profit": 7.1,
+      "gross_loss": 8.51,
+      "net_pnl": -5.43,
+      "profit_factor": 0.834,
+      "total_fees": 3.56,
+      "avg_r_realized": -0.03,
+      "median_r_realized": -0.13,
+      "avg_win_dollars": 5.28,
+      "avg_loss_dollars": -5.36,
+      "max_loss_dollars": -8.03,
+      "avg_mfe_r": 0.52,
+      "avg_r_surrendered": 0.55,
+      "avg_incremental_risk": 2.23
+    },
+    "B_VALID_PULLBACK_CONTINUATION": {
+      "trade_count": 2,
+      "winning_trades": 1,
+      "losing_trades": 1,
+      "win_rate_pct": 50.0,
+      "gross_profit": 2.34,
+      "gross_loss": 11.18,
+      "net_pnl": -11.9,
+      "profit_factor": 0.209,
+      "total_fees": 2.79,
+      "avg_r_realized": -0.395,
+      "median_r_realized": 0.17,
+      "avg_win_dollars": 0.84,
+      "avg_loss_dollars": -12.74,
+      "max_loss_dollars": -12.74,
+      "avg_mfe_r": 0.61,
+      "avg_r_surrendered": 1.01,
+      "avg_incremental_risk": 1.77
+    },
+    "C_NEUTRAL_AMBIGUOUS": {
+      "count": 0
+    },
+    "D_THESIS_DETERIORATING": {
+      "count": 0
+    }
+  },
+  "trade_e409b654_forensic": {
+    "trade_id": "71ebd218",
+    "entry_timestamp": 1785419100000,
+    "entry_price": 4116.911614255319,
+    "initial_stop": 4083.33,
+    "initial_r": 35.57,
+    "initial_risk_dollars": 10.0,
+    "dca_notional": 200.0,
+    "dca_incremental_risk_dollars": 1.73,
+    "total_risk_dollars": 11.72,
+    "mfe_price": 2.81570891,
+    "mfe_r": 0.24,
+    "breakeven_threshold_price": 4152.481614255319,
+    "breakeven_reached": false,
+    "dca_classification": "B_VALID_PULLBACK_CONTINUATION",
+    "causal_dca_justification": "DCA was executed when price pulled back to re-test EMA50 support with score >= 75 in STRONG_BULL regime. However, momentum subsequently broke EMA50 support on heavy selling volume, causing the stop loss to be breached.",
+    "exit_price": 4082.921667,
+    "exit_reason": "Stop loss reference breached (4082.82 <= 4083.33)",
+    "gross_pnl": -11.182692647,
+    "fees_paid": 1.2897913907665,
+    "net_pnl": -12.7433768219845,
+    "realized_r": -0.96
+  },
+  "total_dca_trades": 5,
+  "total_non_dca_trades": 245
+}

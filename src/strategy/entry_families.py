@@ -34,37 +34,57 @@ class BreakoutRetestDetector:
         resistance_level: Decimal,
         atr: Decimal | None = None,
     ) -> EntrySetup | None:
-        """Examine recent candles for a confirmed breakout and retest."""
+        """Examine recent candles for a confirmed breakout and retest.
+
+        Scans up to 5 candles back for a genuine breakout from below resistance,
+        with the latest candle serving as the retest confirmation.
+        """
         if len(candles) < 2:
             return None
 
-        breakout_candle = candles[-2]
         retest_candle = candles[-1]
 
-        # Breakout candle must close clearly above resistance
-        if breakout_candle.close <= resistance_level:
+        # Retest candle must dip into resistance and close above it
+        if not (retest_candle.low <= resistance_level and retest_candle.close > resistance_level):
             return None
 
-        # Retest candle dips into or touches resistance level (low <= resistance)
-        # and holds with a bullish close (close > resistance)
-        if retest_candle.low <= resistance_level and retest_candle.close > resistance_level:
-            candle_ref = min(breakout_candle.low, retest_candle.low)
-            if atr is not None and atr > Decimal("0.0"):
-                structural_boundary = resistance_level - (Decimal("0.1") * atr)
-                stop_ref = min(candle_ref, structural_boundary)
-                min_stop_distance = max(Decimal("0.5") * atr, Decimal("0.05"))
-                if retest_candle.close - stop_ref < min_stop_distance:
-                    return None
-            else:
-                stop_ref = candle_ref
+        # Scan up to 5 candles back for a genuine breakout candle
+        lookback = min(5, len(candles))
+        breakout_candle: Candle | None = None
+        for offset in range(2, lookback + 1):
+            candidate = candles[-offset]
+            # Breakout candle must close above resistance
+            if candidate.close <= resistance_level:
+                continue
+            # Validate genuine breakout from below resistance:
+            # Either prior candle closed at/below resistance,
+            # or candidate candle opened at/below resistance
+            prior_idx = len(candles) - offset - 1
+            if prior_idx >= 0 and candles[prior_idx].close <= resistance_level:
+                breakout_candle = candidate
+                break
+            elif candidate.open <= resistance_level:
+                breakout_candle = candidate
+                break
 
-            return EntrySetup(
-                family=EntryFamily.BREAKOUT_RETEST,
-                level=resistance_level,
-                stop_loss_ref=stop_ref,
-            )
+        if breakout_candle is None:
+            return None
 
-        return None
+        candle_ref = min(breakout_candle.low, retest_candle.low)
+        if atr is not None and atr > Decimal("0.0"):
+            structural_boundary = resistance_level - (Decimal("0.1") * atr)
+            stop_ref = min(candle_ref, structural_boundary)
+            min_stop_distance = max(Decimal("0.5") * atr, Decimal("0.05"))
+            if retest_candle.close - stop_ref < min_stop_distance:
+                return None
+        else:
+            stop_ref = candle_ref
+
+        return EntrySetup(
+            family=EntryFamily.BREAKOUT_RETEST,
+            level=resistance_level,
+            stop_loss_ref=stop_ref,
+        )
 
 
 class SupportReclaimDetector:
@@ -109,12 +129,20 @@ class TrendPullbackDetector:
         atr: Decimal | None = None,
     ) -> EntrySetup | None:
         """Examine candle for pullback into EMA zone with bullish reaction."""
-        # Valid EMA zone in uptrend: ema_20 > ema_50
+        # Require bullish EMA order: ema_20 must be above ema_50 for valid uptrend
+        if ema_20 <= ema_50:
+            return None
+
         upper_zone = max(ema_20, ema_50)
         lower_zone = min(ema_20, ema_50)
+        allowed_lower = (
+            lower_zone - (Decimal("0.2") * atr)
+            if (atr is not None and atr > Decimal("0"))
+            else lower_zone
+        )
 
-        # Candle dips into the EMA support zone
-        if candle.low <= upper_zone and candle.low >= lower_zone:
+        # Candle dips into the EMA support zone (with 0.2*ATR wick tolerance)
+        if candle.low <= upper_zone and candle.low >= allowed_lower:
             # Bullish reaction: candle closes above the zone or closes bullishly
             reaction_ok = candle.close > candle.open or candle.close > upper_zone
             if candle.close >= lower_zone and reaction_ok:
@@ -182,11 +210,12 @@ class EntryOrchestrator:
             if setup is not None:
                 return setup
 
-        # 2. Check Support Reclaim if support level is available
-        if support_level is not None:
-            setup = self.reclaim_detector.evaluate(latest_candle, support_level, atr=atr)
-            if setup is not None:
-                return setup
+        # 2. SUPPORT_RECLAIM disabled: PF 0.18, 20.74% WR across 188 trades in Phase 4A.
+        # Requires quality filter overhaul before re-enabling. See strategy_deep_analysis.md.
+        # if support_level is not None:
+        #     setup = self.reclaim_detector.evaluate(latest_candle, support_level, atr=atr)
+        #     if setup is not None:
+        #         return setup
 
         # 3. Check Trend Pullback into EMA 20/50
         setup = self.pullback_detector.evaluate(latest_candle, ema_20, ema_50, atr=atr)

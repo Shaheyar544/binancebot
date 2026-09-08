@@ -60,3 +60,6 @@ graphify-out/
 
 # Downloaded market data cache
 data/
+
+# Temporary scratch scripts and artifacts
+scratch/
